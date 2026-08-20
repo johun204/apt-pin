@@ -12,7 +12,7 @@ from datetime import date, timedelta, datetime, timezone
 KAKAO_API_KEY = os.getenv('KAKAO_API_KEY')
 DATAGOKR_API_KEY = os.getenv('DATAGOKR_API_KEY')
 CACHE_FILE_PATH = 'data/address_cache.json' # 캐시 파일 경로
-
+print(DATAGOKR_API_KEY)
 # 전역 캐시 저장소 (주소: (장소명, 위도, 경도))
 ADDRESS_CACHE = {}
 
