@@ -4,19 +4,28 @@ import sys
 import json
 import math
 import aiohttp
+import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import date, timedelta, datetime, timezone
 
 # 1. 설정
 KAKAO_API_KEY = os.getenv('KAKAO_API_KEY')
-DATAGOKR_API_KEY = os.getenv('DATAGOKR_API_KEY')
+# data.go.kr는 보통 이미 URL 인코딩된("Encoding") 서비스키를 나눠주는데, aiohttp의 params=는
+# 값을 다시 인코딩하기 때문에 그대로 쓰면 이중 인코딩으로 키가 깨진다(403/429 원인).
+# unquote는 인코딩 안 된 키("Decoding" 형태)를 줘도 안전한 무연산이라 양쪽 다 대응된다.
+_raw_datagokr_key = os.getenv('DATAGOKR_API_KEY')
+DATAGOKR_API_KEY = urllib.parse.unquote(_raw_datagokr_key) if _raw_datagokr_key else None
 CACHE_FILE_PATH = 'data/address_cache.json'
-DATA_FILE_PATH = 'data/data.json'
+TRADE_DATA_FILE_PATH = 'data/trades.json'
+PERMIT_DATA_FILE_PATH = 'data/permits.json'
 APT_TRADE_URL = "https://apis.data.go.kr/1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade"
 KAKAO_KEYWORD_SEARCH_URL = 'https://dapi.kakao.com/v2/local/search/keyword.json'
+# SEOUL_CONTRACT_URL 시크릿이 설정되어 있으면 그걸 우선 사용한다 (엔드포인트가 바뀔 경우 대비)
+PERMIT_CONTRACT_LIST_URL = os.getenv('SEOUL_CONTRACT_URL') or 'https://land.seoul.go.kr/land/wsklis/getContractList.do'
 
 # 구가 있는 시(수원/성남/안양/부천/안산/고양/용인/화성)는 실거래가 항상 구 코드로 등록되고
 # 상위 시 코드로는 조회되지 않아 상위 코드는 뺐다.
+# 서울(11로 시작) 구간은 토지거래허가 크롤러도 그대로 재사용한다.
 LAWD_CD = [
     {'code': '11110', 'kor_name': '서울특별시 종로구'}, {'code': '11140', 'kor_name': '서울특별시 중구'},
     {'code': '11170', 'kor_name': '서울특별시 용산구'}, {'code': '11200', 'kor_name': '서울특별시 성동구'},
@@ -56,13 +65,21 @@ LAWD_CD = [
     {'code': '41800', 'kor_name': '경기도 연천군'}, {'code': '41820', 'kor_name': '경기도 가평군'},
     {'code': '41830', 'kor_name': '경기도 양평군'},
 ]
+SEOUL_DISTRICTS = [d for d in LAWD_CD if d['code'].startswith('11')]
 
 REQUEST_TIMEOUT_SECONDS = 15
 PAGE_CONCURRENCY = 5      # 국토부 실거래가 API 페이지네이션 동시 요청 수
-GEOCODE_CONCURRENCY = 8   # 카카오 지오코딩 API 동시 요청 수
+GEOCODE_CONCURRENCY = 8   # 카카오 지오코딩 API 동시 요청 수 (두 크롤러가 공유)
+
+# 토지거래허가는 구별/날짜별로 조회 가능한 최대 기간이 달라서(초과 시 에러 응답) 탐색으로 찾는다.
+# 60일에서 10일 단위로 좁혀가며 첫 성공 지점을 찾고, 거기서 1일 단위로 넓혀가며
+# 실제 최대 허용 기간을 찾는다.
+PERMIT_INITIAL_LOOKBACK_DAYS = 60
+PERMIT_COARSE_STEP_DAYS = 10
+PERMIT_FINE_STEP_DAYS = 1
 
 
-# -------------------- HTTP 요청 -------------------- #
+# -------------------- HTTP 요청 (공용) -------------------- #
 async def fetch_post(session, url, data=None, json_body=None, headers=None):
     try:
         kwargs = {}
@@ -80,7 +97,7 @@ async def fetch_post(session, url, data=None, json_body=None, headers=None):
         return None
 
 
-# -------------------- 캐시 파일 입출력 -------------------- #
+# -------------------- 캐시 파일 입출력 (공용) -------------------- #
 def load_address_cache(path):
     if not os.path.exists(path):
         print("기존 캐시 파일 없음. 새로 시작합니다.")
@@ -101,7 +118,63 @@ def save_address_cache(path, cache):
     print(f"캐시 파일 저장 완료: {path}")
 
 
-# -------------------- 국토부 실거래가 조회 -------------------- #
+def save_data(path, data):
+    last_updated = (datetime.now(timezone.utc) + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump({"last_updated": last_updated, "data": data}, f, ensure_ascii=False, indent=2)
+    print(f"저장 완료 ({path}): {last_updated}, {len(data)}건")
+
+
+# -------------------- 카카오 좌표 변환 (실거래/허가 공용, 캐시 공유) -------------------- #
+def pick_best_document(documents):
+    for keyword in ('아파트', '주거시설', '부동산'):
+        matches = [doc for doc in documents if keyword in doc['category_name']]
+        if matches:
+            return matches[0]
+    return documents[0] if documents else None
+
+
+async def get_lat_lon(session, address, cache):
+    if address in cache:
+        return cache[address]
+
+    headers = {'Authorization': f'KakaoAK {KAKAO_API_KEY}'}
+    result = await fetch_post(session, KAKAO_KEYWORD_SEARCH_URL, data={'query': address}, headers=headers)
+    if result is None:
+        # 네트워크 오류는 캐시하지 않아 다음 실행에서 재시도되게 한다.
+        return None, None, None
+
+    try:
+        data = json.loads(result)
+        doc = pick_best_document(data['documents'])
+    except (json.JSONDecodeError, KeyError) as e:
+        print(f"지오코딩 응답 파싱 실패 ({address}): {e}")
+        return None, None, None
+
+    # 정상 응답인데 매칭되는 장소가 없는 경우만 (None, None, None)으로 캐시한다.
+    result_tuple = (doc.get('place_name'), doc['y'], doc['x']) if doc else (None, None, None)
+    cache[address] = result_tuple
+    return result_tuple
+
+
+async def geocode_unique_addresses(session, addresses, cache, stats, semaphore):
+    """주소 목록을 중복 없이 지오코딩해 {주소: (place_name, lat, lng)} 딕셔너리로 반환한다."""
+    unique_addresses = list(dict.fromkeys(addresses))
+    for address in unique_addresses:
+        if address in cache:
+            stats["cache_hit"] += 1
+        else:
+            stats["api_call"] += 1
+
+    async def geocode_one(address):
+        async with semaphore:
+            return address, await get_lat_lon(session, address, cache)
+
+    return dict(await asyncio.gather(*(geocode_one(a) for a in unique_addresses)))
+
+
+# ==================== 실거래가 (국토부 RTMS) ==================== #
 def parse_xml_items(xml_text):
     """API 응답 XML에서 item 목록을 파싱한다. API 자체 오류 응답이면 ValueError를 낸다."""
     root = ET.fromstring(xml_text)
@@ -168,51 +241,14 @@ async def fetch_all_apt_trade_data(session, semaphore, api_key, lawd_cd, deal_ym
     return all_items
 
 
-# -------------------- 카카오 좌표 변환 (캐시 적용) -------------------- #
-def pick_best_document(documents):
-    for keyword in ('아파트', '주거시설'):
-        matches = [doc for doc in documents if keyword in doc['category_name']]
-        if matches:
-            return matches[0]
-    return documents[0] if documents else None
+def target_deal_months(today):
+    last_month_end = today.replace(day=1) - timedelta(days=1)
+    two_months_ago_end = last_month_end.replace(day=1) - timedelta(days=1)
+    return [today.strftime("%Y%m"), last_month_end.strftime("%Y%m"), two_months_ago_end.strftime("%Y%m")]
 
 
-async def get_lat_lon(session, address, cache):
-    if address in cache:
-        return cache[address]
-
-    headers = {'Authorization': f'KakaoAK {KAKAO_API_KEY}'}
-    result = await fetch_post(session, KAKAO_KEYWORD_SEARCH_URL, data={'query': address}, headers=headers)
-    if result is None:
-        # 네트워크 오류는 캐시하지 않아 다음 실행에서 재시도되게 한다.
-        return None, None, None
-
-    try:
-        data = json.loads(result)
-        doc = pick_best_document(data['documents'])
-    except (json.JSONDecodeError, KeyError) as e:
-        print(f"지오코딩 응답 파싱 실패 ({address}): {e}")
-        return None, None, None
-
-    # 정상 응답인데 매칭되는 장소가 없는 경우만 (None, None, None)으로 캐시한다.
-    result_tuple = (doc.get('place_name'), doc['y'], doc['x']) if doc else (None, None, None)
-    cache[address] = result_tuple
-    return result_tuple
-
-
-async def geocode_trades(session, records, cache, stats, semaphore):
-    unique_addresses = list(dict.fromkeys(r["ADDRESS"] for r in records))
-    for address in unique_addresses:
-        if address in cache:
-            stats["cache_hit"] += 1
-        else:
-            stats["api_call"] += 1
-
-    async def geocode_one(address):
-        async with semaphore:
-            return address, await get_lat_lon(session, address, cache)
-
-    resolved = dict(await asyncio.gather(*(geocode_one(a) for a in unique_addresses)))
+async def geocode_trade_records(session, records, cache, stats, semaphore):
+    resolved = await geocode_unique_addresses(session, (r["ADDRESS"] for r in records), cache, stats, semaphore)
 
     geocoded = []
     for record in records:
@@ -234,21 +270,7 @@ async def geocode_trades(session, records, cache, stats, semaphore):
     return geocoded
 
 
-def target_deal_months(today):
-    last_month_end = today.replace(day=1) - timedelta(days=1)
-    two_months_ago_end = last_month_end.replace(day=1) - timedelta(days=1)
-    return [today.strftime("%Y%m"), last_month_end.strftime("%Y%m"), two_months_ago_end.strftime("%Y%m")]
-
-
-def save_data(path, data):
-    last_updated = (datetime.now(timezone.utc) + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump({"last_updated": last_updated, "data": data}, f, ensure_ascii=False, indent=2)
-    print(f"작업 완료: {last_updated}")
-
-
-async def process_district(session, district, target_months, page_semaphore, geocode_semaphore, cache, stats):
+async def process_district_trade(session, district, target_months, page_semaphore, geocode_semaphore, cache, stats):
     month_results = await asyncio.gather(*(
         fetch_all_apt_trade_data(session, page_semaphore, DATAGOKR_API_KEY, district["code"], deal_ymd)
         for deal_ymd in target_months
@@ -259,9 +281,144 @@ async def process_district(session, district, target_months, page_semaphore, geo
         record["ADDRESS"] = f"{district['kor_name']} {record['umdNm']} {record['jibun']}"
         record["sggCd"] = district["code"]
 
-    return await geocode_trades(session, records, cache, stats, geocode_semaphore)
+    return await geocode_trade_records(session, records, cache, stats, geocode_semaphore)
 
 
+async def crawl_trades(session, page_semaphore, geocode_semaphore, cache, stats):
+    target_months = target_deal_months(date.today())
+    data = []
+    for district in LAWD_CD:
+        # 한 구의 응답이 예상과 다른 형태(필드 누락 등)여도 나머지 구 수집은 계속되게 한다.
+        try:
+            geocoded = await process_district_trade(
+                session, district, target_months, page_semaphore, geocode_semaphore, cache, stats
+            )
+        except (KeyError, ValueError, TypeError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+            print(f"[오류] {district['code']} {district['kor_name']} 실거래 처리 실패, 건너뜀: {e}")
+            continue
+
+        data.extend(geocoded)
+        print(f"[{district['code']}] {district['kor_name']} 실거래 {len(geocoded)}건")
+    return data
+
+
+# ==================== 토지거래허가 (서울시, 서울만 해당) ==================== #
+async def _try_fetch_permits(session, district, today, lookback_days):
+    """지정한 조회기간으로 1회 시도. 실패/에러/빈 결과면 None."""
+    begin_date = (today - timedelta(days=lookback_days)).strftime("%Y%m%d")
+    end_date = today.strftime("%Y%m%d")
+    payload = {"sggCd": district["code"], "beginDate": begin_date, "endDate": end_date}
+
+    result = await fetch_post(session, PERMIT_CONTRACT_LIST_URL, data=payload)
+    if result is None:
+        return None
+
+    try:
+        content = json.loads(result)
+    except json.JSONDecodeError as e:
+        print(f"{district['code']} {district['kor_name']} {lookback_days}일 응답 파싱 실패: {e}")
+        return None
+
+    return content.get("result") or None
+
+
+async def find_widest_successful_window(attempt, initial_days, coarse_step, fine_step=PERMIT_FINE_STEP_DAYS):
+    """attempt(days) -> 성공 시 결과, 실패 시 None을 반환하는 콜백.
+
+    굵은 단위(coarse_step)로 좁혀가며 처음 성공하는 지점을 찾은 뒤,
+    그 지점에서 1일 단위로 넓혀가며 실제로 성공하는 가장 넓은 기간을 찾는다.
+    (지역구/날짜마다 허용되는 최대 조회기간이 달라서 상수로 고정할 수 없다.)
+    """
+    coarse_days = initial_days
+    result = None
+    while coarse_days > 0:
+        result = await attempt(coarse_days)
+        if result is not None:
+            break
+        coarse_days -= coarse_step
+
+    if result is None:
+        return 0, None
+
+    best_days, best_result = coarse_days, result
+    for fine_days in range(coarse_days + fine_step, min(coarse_days + coarse_step, initial_days), fine_step):
+        candidate = await attempt(fine_days)
+        if candidate is None:
+            break
+        best_days, best_result = fine_days, candidate
+
+    return best_days, best_result
+
+
+async def fetch_district_permits(session, district, today):
+    async def attempt(lookback_days):
+        result = await _try_fetch_permits(session, district, today, lookback_days)
+        if result is None:
+            print(f"{district['code']} {district['kor_name']} {lookback_days}일 로드 실패")
+        return result
+
+    best_days, best_result = await find_widest_successful_window(
+        attempt, PERMIT_INITIAL_LOOKBACK_DAYS, PERMIT_COARSE_STEP_DAYS
+    )
+    if best_result:
+        print(f"{district['code']} {district['kor_name']} 최대 조회기간 {best_days}일")
+    return best_result or []
+
+
+def filter_residential_permits(records):
+    return [
+        x for x in records
+        if x["USE_PURP"] == "주거용" and x["JOB_GBN_NM"] == "허가" and x["JIMOK"] == "대"
+    ]
+
+
+async def geocode_permit_records(session, records, cache, stats, semaphore):
+    resolved = await geocode_unique_addresses(session, (r["ADDRESS"] for r in records), cache, stats, semaphore)
+
+    geocoded = []
+    for record in records:
+        place_name, lat, lng = resolved[record["ADDRESS"]]
+        if place_name and lat and lng:
+            geocoded.append({
+                "address": record["ADDRESS"],
+                "place_name": place_name,
+                "lat": lat,
+                "lng": lng,
+                "date": record["HNDL_YMD"],
+                "sggCd": record["SGG_CD"],
+            })
+    return geocoded
+
+
+async def process_district_permit(session, district, today, geocode_semaphore, cache, stats):
+    records = await fetch_district_permits(session, district, today)
+    residential = filter_residential_permits(records)
+
+    # 서울시 API는 ADDRESS를 이미 "구 동 지번" 형태로 내려준다. 실거래 데이터와 형식을
+    # 맞추기 위해 앞에 "서울특별시"만 붙인다(district['kor_name']은 "서울특별시 구" 전체라
+    # 그대로 붙이면 구 이름이 중복된다).
+    for record in residential:
+        record["ADDRESS"] = f"서울특별시 {record['ADDRESS'].strip()}"
+
+    return await geocode_permit_records(session, residential, cache, stats, geocode_semaphore)
+
+
+async def crawl_permits(session, geocode_semaphore, cache, stats):
+    today = date.today()
+    data = []
+    for district in SEOUL_DISTRICTS:
+        try:
+            geocoded = await process_district_permit(session, district, today, geocode_semaphore, cache, stats)
+        except (KeyError, ValueError, TypeError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+            print(f"[오류] {district['code']} {district['kor_name']} 허가 처리 실패, 건너뜀: {e}")
+            continue
+
+        data.extend(geocoded)
+        print(f"[{district['code']}] {district['kor_name']} 토지거래허가 {len(geocoded)}건")
+    return data
+
+
+# -------------------- 실행 -------------------- #
 async def main():
     if not KAKAO_API_KEY:
         raise SystemExit("KAKAO_API_KEY 환경변수가 설정되지 않았습니다.")
@@ -269,35 +426,27 @@ async def main():
         raise SystemExit("DATAGOKR_API_KEY 환경변수가 설정되지 않았습니다.")
 
     cache = load_address_cache(CACHE_FILE_PATH)
-    stats = {"api_call": 0, "cache_hit": 0}
-    data = []
-    target_months = target_deal_months(date.today())
+    trade_stats = {"api_call": 0, "cache_hit": 0}
+    permit_stats = {"api_call": 0, "cache_hit": 0}
 
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
     page_semaphore = asyncio.Semaphore(PAGE_CONCURRENCY)
     geocode_semaphore = asyncio.Semaphore(GEOCODE_CONCURRENCY)
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        for district in LAWD_CD:
-            # 한 구의 응답이 예상과 다른 형태(필드 누락 등)여도 나머지 구 수집은 계속되게 한다.
-            try:
-                geocoded = await process_district(
-                    session, district, target_months, page_semaphore, geocode_semaphore, cache, stats
-                )
-            except (KeyError, ValueError, TypeError, aiohttp.ClientError, asyncio.TimeoutError) as e:
-                print(f"[오류] {district['code']} {district['kor_name']} 처리 실패, 건너뜀: {e}")
-                continue
+        trade_data, permit_data = await asyncio.gather(
+            crawl_trades(session, page_semaphore, geocode_semaphore, cache, trade_stats),
+            crawl_permits(session, geocode_semaphore, cache, permit_stats),
+        )
 
-            data.extend(geocoded)
-            print(f"[{district['code']}] {district['kor_name']} 실거래 {len(geocoded)}건")
+    print(f"실거래 완료: API 호출 {trade_stats['api_call']}회, 캐시 사용 {trade_stats['cache_hit']}회")
+    print(f"허가 완료: API 호출 {permit_stats['api_call']}회, 캐시 사용 {permit_stats['cache_hit']}회")
 
-    print(f"작업 완료: API 호출 {stats['api_call']}회, 캐시 사용 {stats['cache_hit']}회")
-
-    save_data(DATA_FILE_PATH, data)
+    save_data(TRADE_DATA_FILE_PATH, trade_data)
+    save_data(PERMIT_DATA_FILE_PATH, permit_data)
     save_address_cache(CACHE_FILE_PATH, cache)
 
 
-# -------------------- 실행 -------------------- #
 if __name__ == "__main__":
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

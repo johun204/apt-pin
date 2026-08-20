@@ -41,6 +41,15 @@
             </div>
     </div>
 
+    <div class="mode-toggle" id="modeToggle">
+        <button class="mode-btn active" id="modeTrade" onclick="setMode('trade')">
+            <i class="fa-solid fa-won-sign"></i> 실거래가
+        </button>
+        <button class="mode-btn" id="modePermit" onclick="setMode('permit')">
+            <i class="fa-solid fa-stamp"></i> 토지거래허가
+        </button>
+    </div>
+
     <div class="top-container">
         <div class="filter-group" id="filterGroup">
             <button class="filter-btn active" id="btn60" onclick="setPeriod('60', this)">최근 60일</button>

@@ -13,6 +13,10 @@ L.control.attribution({ position: 'bottomright', prefix: false }).addTo(map);
 
 const gpsLayer = L.layerGroup().addTo(map);
 
+function keyOf(lat, lng) {
+    return `${parseFloat(lat).toFixed(6)}|${parseFloat(lng).toFixed(6)}`;
+}
+
 // 줌 12 미만: 시군구 색칠 지도 / 12~15: (서울만) 동 색칠 지도 / 그 이상은 개별 마커·클러스터
 // 경기도는 동 단위 경계 데이터가 없어 시군구 다음 바로 마커로 전환된다.
 const SIGUNGU_MAX_ZOOM = 12;
@@ -20,7 +24,7 @@ const DONG_MAX_ZOOM = 15;
 const DONG_NAME_MIN_ZOOM = 14;
 let sigunguChoroLayer = null;
 let dongChoroLayer = null;
-// LAWD 코드(sggCd) -> 시군구 표시 이름. sigungu.geojson 로드 시 채워진다.
+// LAWD 코드(sggCd) -> 시군구 표시 이름. sigungu.geojson 로드 시 채워지며 실거래/허가 둘 다 공유한다.
 let LAWD_TO_SIGUNGU = {};
 
 function sigunguKeyOf(item) {
@@ -38,7 +42,7 @@ function computeStatsBy(aggregated, keyFn) {
     const stats = {};
     aggregated.forEach(item => {
         const key = keyFn(item);
-        stats[key] = (stats[key] || 0) + item.trade_count;
+        stats[key] = (stats[key] || 0) + item.count;
     });
     return stats;
 }
@@ -158,18 +162,18 @@ function createClusterGroup() {
         disableClusteringAtZoom: 18,
         iconCreateFunction: function(cluster) {
             const children = cluster.getAllChildMarkers();
-            let totalTrades = 0;
+            let total = 0;
             children.forEach(marker => {
-                totalTrades += (marker.options.trade_count || 0);
+                total += (marker.options.count || 0);
             });
 
             let c = 'custom-cluster-icon';
             let size = 40;
-            if (totalTrades >= 50) { c += ' large'; size = 60; }
-            else if (totalTrades >= 10) { c += ' medium'; size = 50; }
+            if (total >= 50) { c += ' large'; size = 60; }
+            else if (total >= 10) { c += ' medium'; size = 50; }
 
             return new L.DivIcon({
-                html: `<div>${totalTrades}</div>`,
+                html: `<div>${total}</div>`,
                 className: c,
                 iconSize: [size, size]
             });
@@ -177,9 +181,23 @@ function createClusterGroup() {
     });
 }
 
-let allData = [];
-let aggregatedCurrentData = [];
-let lastUpdatedDate = new Date();
+// -------------------- 실거래가 / 토지거래허가 두 데이터셋 -------------------- //
+let currentMode = 'trade'; // 'trade' | 'permit' - 어떤 데이터셋을 지도에 그릴지
+let currentPeriod = '60';
+
+let allTradeData = [];
+let allPermitData = [];
+let tradeLastUpdated = new Date();
+let permitLastUpdated = new Date();
+let tradeLastUpdatedText = '';
+let permitLastUpdatedText = '';
+
+let aggregatedTradeData = [];
+let aggregatedPermitData = [];
+let tradeByKey = {};   // 팝업에서 실거래/허가를 함께 보여주기 위한 좌표 -> 집계 레코드
+let permitByKey = {};
+let aggregatedCurrentData = []; // 현재 모드의 aggregatedTradeData/aggregatedPermitData
+
 let globalMarkers = {};
 
 let currentRankLimit = 10;
@@ -194,30 +212,54 @@ function escapeHtml(str) {
 }
 
 function buildDisplayName(item) {
-    const apt = (item.aptNm || '').replace('아파트', '');
+    if (!item.aptNm) return item.place_name || '';
+    const apt = item.aptNm.replace('아파트', '');
     const place = (item.place_name || '').replace('아파트', '');
     return apt === place ? item.aptNm : `${item.aptNm}(${item.place_name})`;
 }
 
-async function loadData() {
+function activeAggregatedData() {
+    return currentMode === 'trade' ? aggregatedTradeData : aggregatedPermitData;
+}
+
+async function loadDataset(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`${url} 데이터 파일을 찾을 수 없습니다.`);
+    const json = await res.json();
+    const rawData = (json.data || []).map(item => ({ ...item, dateObj: parseDateString(item.date) }));
+    return {
+        rawData,
+        lastUpdated: json.last_updated ? new Date(json.last_updated.replace(' ', 'T')) : new Date(),
+        lastUpdatedText: json.last_updated || '',
+    };
+}
+
+function updateLastUpdatedLabel() {
+    const label = currentMode === 'trade'
+        ? (tradeLastUpdatedText && `실거래가 업데이트: ${tradeLastUpdatedText}`)
+        : (permitLastUpdatedText && `허가정보 업데이트: ${permitLastUpdatedText}`);
+    document.getElementById('last-updated').innerText = label || '';
+}
+
+async function loadAllData() {
     const loadingEl = document.getElementById('loading');
     loadingEl.style.display = 'block';
 
     try {
-        const res = await fetch('./data/data.json');
-        if (!res.ok) throw new Error('데이터 파일을 찾을 수 없습니다.');
-        const json = await res.json();
+        const [trade, permit] = await Promise.all([
+            loadDataset('./data/trades.json'),
+            loadDataset('./data/permits.json'),
+        ]);
 
-        if (json.last_updated) {
-            lastUpdatedDate = new Date(json.last_updated.replace(' ', 'T'));
-            document.getElementById('last-updated').innerText = '업데이트: ' + json.last_updated;
-        }
+        allTradeData = trade.rawData;
+        tradeLastUpdated = trade.lastUpdated;
+        tradeLastUpdatedText = trade.lastUpdatedText;
 
-        allData = json.data.map(item => ({
-            ...item,
-            dateObj: parseDateString(item.date)
-        }));
+        allPermitData = permit.rawData;
+        permitLastUpdated = permit.lastUpdated;
+        permitLastUpdatedText = permit.lastUpdatedText;
 
+        updateLastUpdatedLabel();
         setPeriod('60', document.getElementById('btn60'));
 
     } catch (err) {
@@ -225,6 +267,26 @@ async function loadData() {
         alert('데이터 로드 실패: ' + err.message);
     } finally {
         loadingEl.style.display = 'none';
+    }
+}
+
+function setMode(mode) {
+    if (mode === currentMode) return;
+    currentMode = mode;
+
+    document.getElementById('modeTrade').classList.toggle('active', mode === 'trade');
+    document.getElementById('modePermit').classList.toggle('active', mode === 'permit');
+    selectedDistrict = null;
+
+    updateLastUpdatedLabel();
+    aggregatedCurrentData = activeAggregatedData();
+    renderMarkers(aggregatedCurrentData);
+    updateChoropleths();
+    updateZoomLayers();
+
+    if (document.getElementById('rankingPanel').style.display === 'flex') {
+        currentRankLimit = 10;
+        renderRankingContent();
     }
 }
 
@@ -271,9 +333,7 @@ function renderRankingContent() {
 }
 
 function goToMarker(item) {
-    const latKey = parseFloat(item.lat).toFixed(6);
-    const lngKey = parseFloat(item.lng).toFixed(6);
-    const key = `${latKey}|${lngKey}`;
+    const key = keyOf(item.lat, item.lng);
     const target = globalMarkers[key];
 
     if (target) {
@@ -286,7 +346,7 @@ function goToMarker(item) {
 }
 
 function renderOverallRanking(container) {
-    const sortedData = [...aggregatedCurrentData].sort((a, b) => b.trade_count - a.trade_count);
+    const sortedData = [...aggregatedCurrentData].sort((a, b) => b.count - a.count);
     const ul = document.createElement('ul');
     ul.className = 'rank-list';
 
@@ -308,7 +368,7 @@ function renderOverallRanking(container) {
                 <span class="rank-name">${escapeHtml(buildDisplayName(item))}</span>
                 <span class="rank-addr">${escapeHtml(item.address)}</span>
             </div>
-            <span class="rank-count">${item.trade_count}건</span>
+            <span class="rank-count">${item.count}건</span>
         `;
         ul.appendChild(li);
     }
@@ -331,7 +391,7 @@ function renderDistrictRanking(sidoPrefix, container) {
     aggregatedCurrentData.forEach(item => {
         if (!item.sggCd || !item.sggCd.startsWith(sidoPrefix)) return;
         const key = sigunguKeyOf(item);
-        stats[key] = (stats[key] || 0) + item.trade_count;
+        stats[key] = (stats[key] || 0) + item.count;
     });
 
     const sortedKeys = Object.keys(stats).sort((a, b) => stats[b] - stats[a]);
@@ -373,7 +433,7 @@ function renderDistrictDetail(container, districtName, sidoPrefix) {
 
     const districtData = aggregatedCurrentData
         .filter(item => item.sggCd && item.sggCd.startsWith(sidoPrefix) && sigunguKeyOf(item) === districtName)
-        .sort((a, b) => b.trade_count - a.trade_count);
+        .sort((a, b) => b.count - a.count);
 
     const ul = document.createElement('ul');
     ul.className = 'rank-list';
@@ -392,7 +452,7 @@ function renderDistrictDetail(container, districtName, sidoPrefix) {
                 <span class="rank-name">${escapeHtml(buildDisplayName(item))}</span>
                 <span class="rank-addr">${escapeHtml(item.address)}</span>
             </div>
-            <span class="rank-count">${item.trade_count}건</span>
+            <span class="rank-count">${item.count}건</span>
         `;
         ul.appendChild(li);
     });
@@ -417,26 +477,38 @@ function toggleSearchMode(isSearch) {
     }
 }
 
+function filterByPeriod(data, referenceDate, period) {
+    if (period === 'all') return data;
+    const daysLimit = parseInt(period);
+    return data.filter(item => {
+        if (!item.dateObj) return false;
+        const diff = getDaysDiff(referenceDate, item.dateObj);
+        return diff >= 0 && diff <= daysLimit;
+    });
+}
+
+function indexByKey(aggregated) {
+    const map = {};
+    aggregated.forEach(item => { map[keyOf(item.lat, item.lng)] = item; });
+    return map;
+}
+
+function recomputeAggregates(period) {
+    aggregatedTradeData = aggregateData(filterByPeriod(allTradeData, tradeLastUpdated, period));
+    aggregatedPermitData = aggregateData(filterByPeriod(allPermitData, permitLastUpdated, period));
+    tradeByKey = indexByKey(aggregatedTradeData);
+    permitByKey = indexByKey(aggregatedPermitData);
+}
+
 function setPeriod(period, btn) {
     if (btn) {
         document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
     }
 
-    let filteredData = [];
-
-    if (period === 'all') {
-        filteredData = allData;
-    } else {
-        const daysLimit = parseInt(period);
-        filteredData = allData.filter(item => {
-            if (!item.dateObj) return false;
-            const diff = getDaysDiff(lastUpdatedDate, item.dateObj);
-            return diff >= 0 && diff <= daysLimit;
-        });
-    }
-
-    aggregatedCurrentData = aggregateData(filteredData);
+    currentPeriod = period;
+    recomputeAggregates(period);
+    aggregatedCurrentData = activeAggregatedData();
     renderMarkers(aggregatedCurrentData);
     updateChoropleths();
     updateZoomLayers();
@@ -452,20 +524,18 @@ function aggregateData(points) {
 
     points.forEach(pt => {
         if (!pt.lat || !pt.lng) return;
-        const latKey = parseFloat(pt.lat).toFixed(6);
-        const lngKey = parseFloat(pt.lng).toFixed(6);
-        const key = `${latKey}|${lngKey}`;
+        const key = keyOf(pt.lat, pt.lng);
 
         if (!mapData[key]) {
             mapData[key] = {
                 lat: pt.lat, lng: pt.lng,
                 address: pt.address, place_name: pt.place_name,
                 aptNm: pt.aptNm, sggCd: pt.sggCd,
-                trade_count: 0, history: []
+                count: 0, history: []
             };
         }
-        mapData[key].trade_count += 1;
-        mapData[key].history.push({ date: pt.date, name: pt.place_name, aptNm: pt.aptNm, excluUseAr: pt.excluUseAr, floor: pt.floor, dealAmount: pt.dealAmount });
+        mapData[key].count += 1;
+        mapData[key].history.push(pt);
     });
 
     Object.values(mapData).forEach(item => {
@@ -475,14 +545,14 @@ function aggregateData(points) {
 }
 
 function buildPinIcon(pt) {
-    const pinColor = pt.trade_count >= 10 ? '#e74c3c' : (pt.trade_count >= 3 ? '#f1c40f' : '#3498db');
+    const pinColor = pt.count >= 10 ? '#e74c3c' : (pt.count >= 3 ? '#f1c40f' : '#3498db');
     return L.divIcon({
         html: `
             <svg width="34" height="44" viewBox="0 0 34 44">
                 <path d="M17 0C7.6 0 0 7.6 0 17c0 12.7 17 27 17 27s17-14.3 17-27C34 7.6 26.4 0 17 0z" fill="${pinColor}" stroke="white" stroke-width="2"/>
                 <circle cx="17" cy="16" r="10.5" fill="white"/>
             </svg>
-            <div class="pin-count">${pt.trade_count}</div>
+            <div class="pin-count">${pt.count}</div>
         `,
         className: 'pin-marker',
         iconSize: [34, 44],
@@ -491,8 +561,8 @@ function buildPinIcon(pt) {
     });
 }
 
-function buildPopupContent(pt) {
-    const historyHtml = pt.history.map(h => `
+function buildTradeSection(trade) {
+    const rows = trade.history.map(h => `
         <li class="trade-item">
             <span>${escapeHtml(h.excluUseAr)}</span>
             <span>${escapeHtml(h.floor)}층</span>
@@ -502,15 +572,8 @@ function buildPopupContent(pt) {
     `).join('');
 
     return `
-        <div class="popup-header">
-            <h3>${escapeHtml(buildDisplayName(pt))}</h3>
-            <p>${escapeHtml(pt.address)}</p>
-        </div>
-        <div class="popup-body">
-            <div class="stat-row">
-                <span>📅 총 매매 건수</span>
-                <strong style="color:#2c3e50;">${pt.trade_count}건</strong>
-            </div>
+        <div class="popup-section">
+            <div class="popup-section-title"><i class="fa-solid fa-won-sign"></i> 실거래가 ${trade.count}건</div>
             <ul class="trade-list">
               <li class="trade-item">
                 <span>전용면적</span>
@@ -518,21 +581,55 @@ function buildPopupContent(pt) {
                 <span>가격</span>
                 <span class="trade-date">계약일</span>
               </li>
-              ${historyHtml}</ul>
+              ${rows}</ul>
         </div>
     `;
 }
 
-// 필터(60/30/7일) 전환마다 클러스터/마커를 통째로 새로 만들지 않고,
+function buildPermitSection(permit) {
+    const rows = permit.history.map(h => `
+        <li class="permit-item">
+            <span>${escapeHtml(h.place_name)}</span>
+            <span class="permit-date">${formatDate(h.date)}</span>
+        </li>
+    `).join('');
+
+    return `
+        <div class="popup-section">
+            <div class="popup-section-title"><i class="fa-solid fa-stamp"></i> 토지거래허가 ${permit.count}건</div>
+            <ul class="permit-list">${rows}</ul>
+        </div>
+    `;
+}
+
+// 현재 모드와 상관없이, 같은 좌표에 실거래/허가 데이터가 둘 다 있으면 둘 다 보여준다.
+function buildPopupContent(key) {
+    const trade = tradeByKey[key];
+    const permit = permitByKey[key];
+    const titleSource = trade || permit;
+    if (!titleSource) return '';
+
+    const sections = [];
+    if (trade) sections.push(buildTradeSection(trade));
+    if (permit) sections.push(buildPermitSection(permit));
+
+    return `
+        <div class="popup-header">
+            <h3>${escapeHtml(buildDisplayName(titleSource))}</h3>
+            <p>${escapeHtml(titleSource.address)}</p>
+        </div>
+        <div class="popup-body">${sections.join('')}</div>
+    `;
+}
+
+// 필터(60/30/7일)나 모드 전환마다 클러스터/마커를 통째로 새로 만들지 않고,
 // 이전에 그려둔 마커를 재사용해 사라진 것만 지우고 새로 생긴 것만 추가한다.
 function renderMarkers(points) {
     const nextKeys = new Set();
 
     points.forEach(pt => {
         if (!pt.lat || !pt.lng) return;
-        const latKey = parseFloat(pt.lat).toFixed(6);
-        const lngKey = parseFloat(pt.lng).toFixed(6);
-        const key = `${latKey}|${lngKey}`;
+        const key = keyOf(pt.lat, pt.lng);
         nextKeys.add(key);
 
         const guName = sigunguKeyOf(pt);
@@ -545,16 +642,16 @@ function renderMarkers(points) {
         const existing = globalMarkers[key];
         if (existing) {
             existing.marker.setIcon(buildPinIcon(pt));
-            existing.marker.options.trade_count = pt.trade_count;
-            existing.marker.setPopupContent(buildPopupContent(pt));
+            existing.marker.options.count = pt.count;
+            existing.marker.setPopupContent(buildPopupContent(key));
             return;
         }
 
         const marker = L.marker([pt.lat, pt.lng], {
             icon: buildPinIcon(pt),
-            trade_count: pt.trade_count
+            count: pt.count
         });
-        marker.bindPopup(buildPopupContent(pt));
+        marker.bindPopup(buildPopupContent(key));
         guClusterLayers[guName].addLayer(marker);
         globalMarkers[key] = { marker: marker, clusterGroup: guClusterLayers[guName] };
     });
@@ -565,6 +662,10 @@ function renderMarkers(points) {
         clusterGroup.removeLayer(marker);
         delete globalMarkers[key];
     });
+}
+
+function activeRawData() {
+    return currentMode === 'trade' ? allTradeData : allPermitData;
 }
 
 const searchInput = document.getElementById('searchInput');
@@ -579,7 +680,7 @@ searchInput.addEventListener('input', function(e) {
 
     const keywords = query.trim().split(/\s+/);
 
-    const rawMatches = allData.filter(d => {
+    const rawMatches = activeRawData().filter(d => {
         const safeAddress = (d.address || '').toLowerCase();
         const safePlaceName = (d.place_name || '').toLowerCase();
         const safeAptNm = (d.aptNm || '').toLowerCase();
@@ -623,13 +724,10 @@ searchInput.addEventListener('input', function(e) {
 });
 
 function moveToPoint(lat, lng) {
-    setPeriod('60', document.getElementById('btn60'));
+    setPeriod(currentPeriod, document.getElementById(`btn${currentPeriod}`));
     toggleSearchMode(false);
 
-    const latKey = parseFloat(lat).toFixed(6);
-    const lngKey = parseFloat(lng).toFixed(6);
-    const key = `${latKey}|${lngKey}`;
-
+    const key = keyOf(lat, lng);
     const target = globalMarkers[key];
 
     if (target) {
@@ -682,9 +780,7 @@ map.on('locationfound', e => {
 async function init() {
     // sggCd -> 시군구 이름 매핑이 준비된 뒤에 데이터를 그려야 마커가 올바른 그룹으로 묶인다
     await Promise.all([loadSigunguBoundaries(), loadDongBoundaries()]);
-    await loadData();
-    updateChoropleths();
-    updateZoomLayers();
+    await loadAllData();
 }
 
 init();

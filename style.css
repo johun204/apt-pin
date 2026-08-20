@@ -1,9 +1,27 @@
 body { margin: 0; padding: 0; font-family: 'Noto Sans KR', sans-serif; -webkit-tap-highlight-color: transparent; }
 #map { width: 100%; height: 100vh; z-index: 1; background: #f0f0f0; }
 
+/* --- 0. 모드 전환 (실거래가 / 토지거래허가) --- */
+.mode-toggle {
+    position: absolute; top: 15px; left: 50%; transform: translateX(-50%);
+    z-index: 1000; width: 90%; max-width: 400px; height: 40px;
+    display: flex; gap: 6px;
+}
+.mode-btn {
+    flex: 1; border: none; border-radius: 20px; cursor: pointer;
+    font-weight: 700; font-size: 13px; color: #555;
+    background: rgba(255, 255, 255, 0.95);
+    box-shadow: 0 4px 10px rgba(0,0,0,0.12);
+    transition: 0.2s; display: flex; align-items: center; justify-content: center; gap: 6px;
+}
+.mode-btn:hover { background: #fff; }
+.mode-btn.active { color: white; box-shadow: 0 2px 6px rgba(0,0,0,0.25); }
+#modeTrade.active { background: #2c8ec9; }
+#modePermit.active { background: #8e5cd9; }
+
 /* --- 1. 상단 UI (필터/검색) --- */
 .top-container {
-    position: absolute; top: 15px; left: 50%; transform: translateX(-50%);
+    position: absolute; top: 63px; left: 50%; transform: translateX(-50%);
     z-index: 1000; width: 90%; max-width: 400px; height: 44px;
 }
 .filter-group {
@@ -60,7 +78,7 @@ body { margin: 0; padding: 0; font-family: 'Noto Sans KR', sans-serif; -webkit-t
 /* --- 2. 랭킹 버튼 (상단 버튼 아래, 왼쪽) --- */
 .ranking-trigger-btn {
     position: absolute;
-    top: 75px;
+    top: 123px;
     left: 15px;
     z-index: 1000;
     background: white; width: 44px; height: 44px; border-radius: 50%;
@@ -73,7 +91,7 @@ body { margin: 0; padding: 0; font-family: 'Noto Sans KR', sans-serif; -webkit-t
 
 /* --- 3. 랭킹 패널 --- */
 .ranking-panel {
-    position: absolute; top: 75px; left: 50%; transform: translateX(-50%);
+    position: absolute; top: 123px; left: 50%; transform: translateX(-50%);
     width: 90%; max-width: 400px; max-height: 60vh;
     background: white; border-radius: 15px;
     box-shadow: 0 4px 20px rgba(0,0,0,0.2);
@@ -189,12 +207,24 @@ body { margin: 0; padding: 0; font-family: 'Noto Sans KR', sans-serif; -webkit-t
 }
 
 .leaflet-popup-content-wrapper { border-radius: 12px; padding: 0; overflow: hidden; }
-.leaflet-popup-content { margin: 0; width: 300px !important; }
+.leaflet-popup-content { margin: 0; width: 310px !important; }
 .popup-header { background: #2c3e50; color: white; padding: 15px; }
 .popup-header h3 { margin: 0; font-size: 16px; font-weight: 700; }
 .popup-header p { margin: 5px 0 0; font-size: 12px; opacity: 0.8; }
-.popup-body { padding: 15px; max-height: 200px; overflow-y: auto; }
+.popup-body { padding: 12px 15px; max-height: 320px; overflow-y: auto; }
 .stat-row { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 14px; }
-.trade-list { list-style: none; padding: 0; margin: 10px 0 0; border-top: 1px dashed #ddd; }
+
+/* 실거래가/토지거래허가 섹션을 팝업 하나 안에 같이 보여줄 때 구분선 겸 여백 */
+.popup-section + .popup-section { margin-top: 14px; padding-top: 14px; border-top: 1px solid #eee; }
+.popup-section-title {
+    font-size: 13px; font-weight: 700; color: #2c3e50;
+    display: flex; align-items: center; gap: 6px;
+}
+
+.trade-list { list-style: none; padding: 0; margin: 8px 0 0; border-top: 1px dashed #ddd; }
 .trade-item { padding: 8px 0; border-bottom: 1px solid #f1f1f1; font-size: 13px; display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; align-items: center; text-align: center; color: #555; }
 .trade-date { color: #888; font-size: 12px; }
+
+.permit-list { list-style: none; padding: 0; margin: 8px 0 0; border-top: 1px dashed #ddd; }
+.permit-item { padding: 8px 0; border-bottom: 1px solid #f1f1f1; font-size: 13px; display: flex; justify-content: space-between; color: #555; }
+.permit-date { color: #888; font-size: 12px; }
