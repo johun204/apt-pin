@@ -1,10 +1,10 @@
 {
-  "name": "부동산 실거래가 지도",
-  "short_name": "부동산 실거래가 지도",
+  "name": "부동산레이더",
+  "short_name": "부동산레이더",
   "start_url": "/real-estate-map",
   "display": "standalone",
   "background_color": "#ffffff",
-  "theme_color": "#ffffff",
+  "theme_color": "#2c8ec9",
   "icons": [
     { "src": "/real-estate-map/images/icon-192x192.png", "sizes": "192x192", "type": "image/png" },
     { "src": "/real-estate-map/images/icon-512x512.png", "sizes": "512x512", "type": "image/png" }

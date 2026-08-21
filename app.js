@@ -23,6 +23,14 @@ function keyOf(lat, lng) {
 const SIGUNGU_MAX_ZOOM = 12;
 const MARKER_MIN_ZOOM = 15;
 const DONG_COUNT_MIN_ZOOM = 14;
+// 기본 화면(줌 11)보다 더 축소하면 라벨이 겹치기 시작하므로 단계적으로 정보를 줄인다:
+// 건수부터 숨기고, 더 축소하면 이름도 숨겨서 색상만 남긴다.
+const SIGUNGU_COUNT_MIN_ZOOM = 10;
+const SIGUNGU_NAME_MIN_ZOOM = 8;
+// 코로플레스 색은 지형이 잘 보이도록 이전보다 더 투명하게 하되, 완전 0은 클릭 히트테스트가
+// 안 먹는 브라우저가 있어 최소값을 남겨둔다.
+const CHORO_BASE_FILL_OPACITY = 0.42;
+const CHORO_MIN_FILL_OPACITY = 0.04;
 let sigunguChoroLayer = null;
 let dongChoroLayer = null;
 // LAWD 코드(sggCd) -> 시군구 표시 이름. sigungu.geojson 로드 시 채워지며 실거래/허가 둘 다 공유한다.
@@ -89,7 +97,7 @@ async function loadSigunguBoundaries() {
     geojson.features.forEach(f => {
         (f.properties.codes || []).forEach(code => { LAWD_TO_SIGUNGU[code] = f.properties.name; });
     });
-    sigunguChoroLayer = createChoroLayer(geojson, f => f.properties.name, f => f.properties.name);
+    sigunguChoroLayer = createChoroLayer(geojson, f => f.properties.name, f => f.properties.name, 'sigungu-tooltip');
 }
 
 async function loadDongBoundaries() {
@@ -115,7 +123,7 @@ function updateChoropleth(layer, stats) {
         if (!layer.hasLayer(featureLayer)) layer.addLayer(featureLayer);
 
         // 0건인 지역은 색 없이 경계선만 보여준다(마커 단계에서 테두리만 남길 때도 이 값을 씀).
-        featureLayer._choroFillOpacity = count > 0 ? 0.65 : 0;
+        featureLayer._choroFillOpacity = count > 0 ? CHORO_BASE_FILL_OPACITY : CHORO_MIN_FILL_OPACITY;
         featureLayer.setStyle({ fillColor: choroColorScale(count, breaks), fillOpacity: featureLayer._choroFillOpacity });
         featureLayer.setTooltipContent(
             `<span class="gu-name">${featureLayer._labelName}</span><span class="gu-count">${count}<span class="gu-unit">건</span></span>`
@@ -145,11 +153,22 @@ function toggleFeatureLayer(featureLayer, group, shouldShow) {
 }
 
 // 마커 단계(줌 >= MARKER_MIN_ZOOM)에서도 색칠은 빼고 구/동 경계선만 남겨서 보여준다.
-function applyChoroFeatureStyle(featureLayer, isOutline) {
+// 줌 SIGUNGU_MAX_ZOOM ~ MARKER_MIN_ZOOM 구간에서 색을 한 번에 빼지 않고 점점 옅어지게 한다
+// (기본 화면에서 마커 화면으로 넘어갈 때 갑자기 훅 사라지면 부자연스러워서).
+function choroFadeFactor(zoom) {
+    if (zoom <= SIGUNGU_MAX_ZOOM) return 1;
+    if (zoom >= MARKER_MIN_ZOOM) return 0;
+    return 1 - (zoom - SIGUNGU_MAX_ZOOM) / (MARKER_MIN_ZOOM - SIGUNGU_MAX_ZOOM);
+}
+
+function applyChoroFeatureStyle(featureLayer, zoom) {
+    const base = featureLayer._choroFillOpacity ?? CHORO_MIN_FILL_OPACITY;
+    const factor = choroFadeFactor(zoom);
+    const isMarkerTier = zoom >= MARKER_MIN_ZOOM;
     featureLayer.setStyle({
-        fillOpacity: isOutline ? 0 : (featureLayer._choroFillOpacity ?? 0.35),
-        color: isOutline ? '#95a5a6' : '#fff',
-        weight: isOutline ? 1.5 : 2,
+        fillOpacity: Math.max(CHORO_MIN_FILL_OPACITY, CHORO_MIN_FILL_OPACITY + (base - CHORO_MIN_FILL_OPACITY) * factor),
+        color: isMarkerTier ? '#95a5a6' : '#fff',
+        weight: isMarkerTier ? 2.5 : 2,
     });
 }
 
@@ -165,17 +184,19 @@ function updateZoomLayers() {
             const isSeoul = featureLayer.feature.properties.sido === '서울특별시';
             const shouldShow = isSeoul ? zoom < SIGUNGU_MAX_ZOOM : true;
             toggleFeatureLayer(featureLayer, sigunguChoroLayer, shouldShow);
-            if (shouldShow) applyChoroFeatureStyle(featureLayer, isMarkerTier);
+            if (shouldShow) applyChoroFeatureStyle(featureLayer, zoom);
         });
         toggleMapLayer(sigunguChoroLayer, true);
     }
 
     toggleMapLayer(dongChoroLayer, zoom >= SIGUNGU_MAX_ZOOM);
     if (dongChoroLayer && zoom >= SIGUNGU_MAX_ZOOM) {
-        dongChoroLayer._allLayers.forEach(featureLayer => applyChoroFeatureStyle(featureLayer, isMarkerTier));
+        dongChoroLayer._allLayers.forEach(featureLayer => applyChoroFeatureStyle(featureLayer, zoom));
     }
 
     map.getContainer().classList.toggle('map-hide-dong-count', zoom < DONG_COUNT_MIN_ZOOM);
+    map.getContainer().classList.toggle('map-hide-sigungu-count', zoom < SIGUNGU_COUNT_MIN_ZOOM);
+    map.getContainer().classList.toggle('map-hide-sigungu-name', zoom < SIGUNGU_NAME_MIN_ZOOM);
     map.getContainer().classList.toggle('map-outline-mode', isMarkerTier);
 
     // 서울·경기도 둘 다 같은 줌부터 개별 마커/클러스터로 전환한다
@@ -191,7 +212,9 @@ let guClusterLayers = {};
 function createClusterGroup() {
     return L.markerClusterGroup({
         chunkedLoading: true,
-        maxClusterRadius: 60,
+        // 핀 아이콘 폭이 32px이라, 그 정도로 실제 겹칠 때만 뭉치고 어느 정도 떨어져 있으면
+        // 개별 핀으로 보이게 반경을 줄였다(기존 60px은 너무 멀리서도 뭉쳐 보였음).
+        maxClusterRadius: 30,
         disableClusteringAtZoom: 18,
         iconCreateFunction: function(cluster) {
             const children = cluster.getAllChildMarkers();
@@ -642,11 +665,13 @@ function buildCombinedHistorySection(trade, permit) {
             </li>`;
     }).join('');
 
-    const totalCount = (trade ? trade.count : 0) + (permit ? permit.count : 0);
+    const tradeCount = trade ? trade.count : 0;
+    const permitCount = permit ? permit.count : 0;
+    const totalCount = tradeCount + permitCount;
 
     return `
         <div class="popup-section">
-            <div class="popup-section-title"><i class="fa-solid fa-list"></i> 전체 내역 ${totalCount}건</div>
+            <div class="popup-section-title"><i class="fa-solid fa-list"></i> 전체 내역 ${totalCount}건 (실거래 ${tradeCount}건, 토지거래허가 ${permitCount}건)</div>
             <ul class="history-list">${rowsHtml}</ul>
         </div>
     `;
