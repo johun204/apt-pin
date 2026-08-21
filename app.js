@@ -103,7 +103,7 @@ async function loadDongBoundaries() {
     );
 }
 
-function updateChoropleth(layer, stats, hideEmpty) {
+function updateChoropleth(layer, stats) {
     if (!layer) return;
     const values = Object.values(stats).filter(v => v > 0).sort((a, b) => a - b);
     const breaks = values.length
@@ -112,26 +112,23 @@ function updateChoropleth(layer, stats, hideEmpty) {
 
     layer._allLayers.forEach(featureLayer => {
         const count = stats[featureLayer._statKey] || 0;
-
-        if (hideEmpty && count <= 0) {
-            if (layer.hasLayer(featureLayer)) layer.removeLayer(featureLayer);
-            return;
-        }
         if (!layer.hasLayer(featureLayer)) layer.addLayer(featureLayer);
 
-        // 마커 단계에서 테두리만 남기고 색을 뺐다가(줌아웃 없이) 다시 복원할 때 쓸 값을 기억해둔다
-        featureLayer._choroFillOpacity = count > 0 ? 0.65 : 0.35;
+        // 0건인 지역은 색 없이 경계선만 보여준다(마커 단계에서 테두리만 남길 때도 이 값을 씀).
+        featureLayer._choroFillOpacity = count > 0 ? 0.65 : 0;
         featureLayer.setStyle({ fillColor: choroColorScale(count, breaks), fillOpacity: featureLayer._choroFillOpacity });
         featureLayer.setTooltipContent(
             `<span class="gu-name">${featureLayer._labelName}</span><span class="gu-count">${count}<span class="gu-unit">건</span></span>`
         );
+        // 동은 개수가 많아 0건까지 이름표를 다 띄우면 서로 겹치므로, 0건이면 라벨만 숨긴다(경계선은 유지).
+        const tooltip = featureLayer.getTooltip();
+        if (tooltip) tooltip.setOpacity(count > 0 ? 1 : 0);
     });
 }
 
 function updateChoropleths() {
-    updateChoropleth(sigunguChoroLayer, computeSigunguStats(aggregatedCurrentData), false);
-    // 동은 개수가 많아 0건까지 표시하면 라벨이 겹치므로 데이터 있는 동만 보여준다
-    updateChoropleth(dongChoroLayer, computeDongStats(aggregatedCurrentData), true);
+    updateChoropleth(sigunguChoroLayer, computeSigunguStats(aggregatedCurrentData));
+    updateChoropleth(dongChoroLayer, computeDongStats(aggregatedCurrentData));
 }
 
 function toggleMapLayer(layer, shouldShow) {
@@ -175,9 +172,7 @@ function updateZoomLayers() {
 
     toggleMapLayer(dongChoroLayer, zoom >= SIGUNGU_MAX_ZOOM);
     if (dongChoroLayer && zoom >= SIGUNGU_MAX_ZOOM) {
-        dongChoroLayer._allLayers.forEach(featureLayer => {
-            if (dongChoroLayer.hasLayer(featureLayer)) applyChoroFeatureStyle(featureLayer, isMarkerTier);
-        });
+        dongChoroLayer._allLayers.forEach(featureLayer => applyChoroFeatureStyle(featureLayer, isMarkerTier));
     }
 
     map.getContainer().classList.toggle('map-hide-dong-count', zoom < DONG_COUNT_MIN_ZOOM);
@@ -370,17 +365,25 @@ function renderRankingContent() {
     }
 }
 
-function goToMarker(item) {
-    const key = keyOf(item.lat, item.lng);
+// 코로플레스 단계(마커 클러스터가 지도에서 빠진 상태)에서 검색/랭킹으로 위치 이동을 시도하면
+// zoomToShowLayer가 지도에 붙어있지 않은 레이어에는 안 먹혀서 조용히 아무 일도 안 일어난다.
+// 그래서 이동 전에 클러스터 레이어를 먼저 지도에 붙여둔다(최종 줌 결과는 zoomend가 다시 정리한다).
+function focusMarker(lat, lng) {
+    const key = keyOf(lat, lng);
     const target = globalMarkers[key];
 
     if (target) {
+        if (!map.hasLayer(target.clusterGroup)) map.addLayer(target.clusterGroup);
         target.clusterGroup.zoomToShowLayer(target.marker, function() {
             target.marker.openPopup();
         });
     } else {
-        map.flyTo([item.lat, item.lng], 17);
+        map.flyTo([lat, lng], 17, { duration: 1.5 });
     }
+}
+
+function goToMarker(item) {
+    focusMarker(item.lat, item.lng);
 }
 
 function renderOverallRanking(container) {
@@ -912,19 +915,7 @@ searchInput.addEventListener('input', function(e) {
 function moveToPoint(lat, lng) {
     setPeriod(currentPeriod, document.getElementById(`btn${currentPeriod}`));
     toggleSearchMode(false);
-
-    const key = keyOf(lat, lng);
-    const target = globalMarkers[key];
-
-    if (target) {
-        // 마커가 클러스터 내부에 있을 경우를 대비해 zoomToShowLayer 실행 후 openPopup 호출
-        target.clusterGroup.zoomToShowLayer(target.marker, function() {
-            target.marker.openPopup();
-        });
-    } else {
-        // 필터링(예: 최근 60일) 조건에 의해 해당 위치에 생성된 마커가 없는 경우 지도 이동만 수행
-        map.flyTo([lat, lng], 17, { duration: 1.5 });
-    }
+    focusMarker(lat, lng);
 }
 
 function parseDateString(dateStr) {
