@@ -90,6 +90,112 @@ def test_fetch_page_survives_connection_timeout():
     assert items == []
 
 
+def test_fetch_page_retries_on_429_then_succeeds():
+    # 실제 72개 구를 전부 도는 실행에서 뒷부분(경기도 포함)이 429로 통째로 비는 걸 확인한 버그.
+    call_count = {'n': 0}
+
+    class FakeResponse:
+        def __init__(self, status, text):
+            self.status = status
+            self._text = text
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def text(self):
+            return self._text
+
+    success_xml = (
+        "<response><header><resultCode>000</resultCode></header>"
+        "<body><items><item><aptNm>X</aptNm></item></items></body></response>"
+    )
+
+    class FakeSession:
+        def get(self, *args, **kwargs):
+            call_count['n'] += 1
+            if call_count['n'] <= 2:
+                return FakeResponse(429, '')
+            return FakeResponse(200, success_xml)
+
+    async def run():
+        with patch('main.RATE_LIMIT_BACKOFF_BASE', 0):
+            return await fetch_page(FakeSession(), asyncio.Semaphore(1), 'http://example.com', {'pageNo': '1'})
+
+    root, items = asyncio.run(run())
+    assert call_count['n'] == 3  # 429 두 번 재시도 후 세 번째에 성공
+    assert len(items) == 1
+
+
+def test_fetch_page_gives_up_after_max_retries_on_429():
+    class FakeResponse:
+        def __init__(self, status):
+            self.status = status
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def text(self):
+            return ''
+
+    class FakeSession:
+        def get(self, *args, **kwargs):
+            return FakeResponse(429)
+
+    async def run():
+        with patch('main.RATE_LIMIT_BACKOFF_BASE', 0):
+            return await fetch_page(FakeSession(), asyncio.Semaphore(1), 'http://example.com', {'pageNo': '1'}, max_retries=2)
+
+    root, items = asyncio.run(run())
+    assert root is None
+    assert items == []
+
+
+def test_fetch_district_permits_reuses_cached_window_and_probes_one_day_wider():
+    calls = []
+
+    async def fake_try(session, district, today, lookback_days):
+        calls.append(lookback_days)
+        return ['item'] if lookback_days <= 33 else None  # 실제로는 33일까지 통한다고 가정
+
+    district = {'code': '11110', 'kor_name': '서울특별시 종로구'}
+    window_cache = {'11110': 32}  # 지난 실행엔 32일까지 통했음
+
+    async def run():
+        with patch('main._try_fetch_permits', new=fake_try):
+            return await main.fetch_district_permits(None, district, date(2026, 8, 21), window_cache)
+
+    result = asyncio.run(run())
+    assert result == ['item']
+    assert calls == [32, 33]  # 캐시값 확인 + 1일 확장 시도만, 전체 탐색은 안 함
+    assert window_cache['11110'] == 33
+
+
+def test_fetch_district_permits_falls_back_to_full_search_when_cache_stale():
+    calls = []
+
+    async def fake_try(session, district, today, lookback_days):
+        calls.append(lookback_days)
+        return ['item'] if lookback_days <= 20 else None
+
+    district = {'code': '11110', 'kor_name': '서울특별시 종로구'}
+    window_cache = {'11110': 55}  # 더 이상 통하지 않는 오래된 캐시값
+
+    async def run():
+        with patch('main._try_fetch_permits', new=fake_try):
+            return await main.fetch_district_permits(None, district, date(2026, 8, 21), window_cache)
+
+    result = asyncio.run(run())
+    assert result == ['item']
+    assert calls[0] == 55  # 캐시값을 먼저 시도해보고
+    assert window_cache['11110'] <= 20  # 실패하면 전체 재탐색으로 갱신됨
+
+
 def test_filter_residential_permits():
     records = [
         {"USE_PURP": "주거용", "JOB_GBN_NM": "허가", "JIMOK": "대", "id": "keep"},
@@ -204,6 +310,10 @@ if __name__ == "__main__":
     test_parse_xml_items_success()
     test_parse_xml_items_api_error_raises()
     test_fetch_page_survives_connection_timeout()
+    test_fetch_page_retries_on_429_then_succeeds()
+    test_fetch_page_gives_up_after_max_retries_on_429()
+    test_fetch_district_permits_reuses_cached_window_and_probes_one_day_wider()
+    test_fetch_district_permits_falls_back_to_full_search_when_cache_stale()
     test_filter_residential_permits()
     test_find_widest_successful_window_finds_exact_boundary()
     test_find_widest_successful_window_boundary_at_initial_days()

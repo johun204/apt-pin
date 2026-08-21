@@ -602,6 +602,76 @@ function buildPermitSection(permit) {
     `;
 }
 
+// 선택된 기간(60/30/7일) x축 위에 실거래가는 꺾은선, 허가 건수는 막대로 겹쳐 보여준다.
+function buildPriceChart(trade, permit) {
+    const width = 274, height = 110;
+    const padTop = 10, padBottom = 6, padX = 6;
+    const chartTop = padTop, chartBottom = height - padBottom;
+
+    const now = tradeLastUpdatedText ? tradeLastUpdated : permitLastUpdated;
+    let startDate;
+    if (currentPeriod === 'all') {
+        const allDates = [
+            ...(trade ? trade.history.map(h => parseDateString(h.date)) : []),
+            ...(permit ? permit.history.map(h => parseDateString(h.date)) : []),
+        ].filter(Boolean);
+        startDate = allDates.length ? new Date(Math.min(...allDates)) : new Date(now.getTime() - 60 * 86400000);
+    } else {
+        startDate = new Date(now);
+        startDate.setDate(startDate.getDate() - parseInt(currentPeriod));
+    }
+
+    const span = Math.max(1, now.getTime() - startDate.getTime());
+    const xScale = (d) => padX + ((d.getTime() - startDate.getTime()) / span) * (width - padX * 2);
+
+    const tradePoints = (trade ? trade.history : [])
+        .map(h => ({ d: parseDateString(h.date), price: dealAmountToUk(h.dealAmount) }))
+        .filter(p => p.d)
+        .sort((a, b) => a.d - b.d);
+
+    const permitByDay = {};
+    (permit ? permit.history : []).forEach(h => {
+        if (!parseDateString(h.date)) return;
+        permitByDay[h.date] = (permitByDay[h.date] || 0) + 1;
+    });
+    const permitEntries = Object.entries(permitByDay).map(([dateStr, count]) => ({ d: parseDateString(dateStr), count }));
+
+    if (!tradePoints.length && !permitEntries.length) return '';
+
+    const maxPrice = Math.max(1, ...tradePoints.map(p => p.price));
+    const yPrice = (price) => chartBottom - (price / maxPrice) * (chartBottom - chartTop);
+    const maxPermitCount = Math.max(1, ...permitEntries.map(p => p.count));
+    const barAreaHeight = (chartBottom - chartTop) * 0.55;
+    const barWidth = 5;
+
+    const bars = permitEntries.map(p => {
+        const x = xScale(p.d);
+        const barHeight = (p.count / maxPermitCount) * barAreaHeight;
+        return `<rect x="${(x - barWidth / 2).toFixed(1)}" y="${(chartBottom - barHeight).toFixed(1)}" width="${barWidth}" height="${barHeight.toFixed(1)}" fill="#8e5cd9" opacity="0.45" rx="1.5" />`;
+    }).join('');
+
+    const linePath = tradePoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xScale(p.d).toFixed(1)} ${yPrice(p.price).toFixed(1)}`).join(' ');
+    const dots = tradePoints.map(p => `<circle cx="${xScale(p.d).toFixed(1)}" cy="${yPrice(p.price).toFixed(1)}" r="2.5" fill="#2c8ec9" />`).join('');
+
+    const legendItems = [
+        tradePoints.length ? '<span><i class="legend-dot legend-line"></i>실거래가</span>' : '',
+        permitEntries.length ? '<span><i class="legend-dot legend-bar"></i>허가 건수</span>' : '',
+    ].join('');
+
+    return `
+        <div class="popup-section">
+            <div class="popup-section-title"><i class="fa-solid fa-chart-line"></i> 기간 내 변동 추이</div>
+            <svg class="popup-chart" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+                <line x1="${padX}" y1="${chartBottom}" x2="${width - padX}" y2="${chartBottom}" stroke="#eee" stroke-width="1" />
+                ${bars}
+                ${tradePoints.length > 1 ? `<path d="${linePath}" fill="none" stroke="#2c8ec9" stroke-width="2" />` : ''}
+                ${dots}
+            </svg>
+            <div class="popup-chart-legend">${legendItems}</div>
+        </div>
+    `;
+}
+
 // 현재 모드와 상관없이, 같은 좌표에 실거래/허가 데이터가 둘 다 있으면 둘 다 보여준다.
 function buildPopupContent(key) {
     const trade = tradeByKey[key];
@@ -610,6 +680,8 @@ function buildPopupContent(key) {
     if (!titleSource) return '';
 
     const sections = [];
+    const chart = buildPriceChart(trade, permit);
+    if (chart) sections.push(chart);
     if (trade) sections.push(buildTradeSection(trade));
     if (permit) sections.push(buildPermitSection(permit));
 
@@ -668,6 +740,23 @@ function activeRawData() {
     return currentMode === 'trade' ? allTradeData : allPermitData;
 }
 
+// -------------------- 초성 검색 -------------------- //
+const CHOSUNG_LIST = ['ㄱ','ㄲ','ㄴ','ㄷ','ㄸ','ㄹ','ㅁ','ㅂ','ㅃ','ㅅ','ㅆ','ㅇ','ㅈ','ㅉ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ'];
+const CHOSUNG_SET = new Set(CHOSUNG_LIST);
+
+function toChosung(str) {
+    let result = '';
+    for (const ch of str) {
+        const code = ch.charCodeAt(0) - 0xAC00;
+        result += (code >= 0 && code <= 11171) ? CHOSUNG_LIST[Math.floor(code / 588)] : ch;
+    }
+    return result;
+}
+
+function isChosungOnly(str) {
+    return str.length > 0 && [...str].every(ch => CHOSUNG_SET.has(ch));
+}
+
 const searchInput = document.getElementById('searchInput');
 const searchResults = document.getElementById('searchResults');
 
@@ -681,15 +770,20 @@ searchInput.addEventListener('input', function(e) {
     const keywords = query.trim().split(/\s+/);
 
     const rawMatches = activeRawData().filter(d => {
-        const safeAddress = (d.address || '').toLowerCase();
-        const safePlaceName = (d.place_name || '').toLowerCase();
-        const safeAptNm = (d.aptNm || '').toLowerCase();
+        const address = d.address || '';
+        const placeName = d.place_name || '';
+        const aptNm = d.aptNm || '';
 
         return keywords.every(kw => {
+            if (isChosungOnly(kw)) {
+                return toChosung(address).includes(kw) ||
+                       toChosung(placeName).includes(kw) ||
+                       toChosung(aptNm).includes(kw);
+            }
             const lowerKw = kw.toLowerCase();
-            return safeAddress.includes(lowerKw) ||
-                   safePlaceName.includes(lowerKw) ||
-                   safeAptNm.includes(lowerKw);
+            return address.toLowerCase().includes(lowerKw) ||
+                   placeName.toLowerCase().includes(lowerKw) ||
+                   aptNm.toLowerCase().includes(lowerKw);
         });
     });
 
@@ -760,11 +854,13 @@ function formatDate(str) {
     return `${str.substring(0,4)}.${str.substring(4,6)}.${str.substring(6,8)}`;
 }
 
-function formatToUk(value) {
+function dealAmountToUk(value) {
     const num = Number(value.toString().replace(/,/g, ''));
-    const ukNum = num / 10000;
-    const formattedNum = Number(ukNum.toFixed(2));
-    return formattedNum + '억';
+    return Number((num / 10000).toFixed(2));
+}
+
+function formatToUk(value) {
+    return dealAmountToUk(value) + '억';
 }
 
 function moveToCurrentLocation() {

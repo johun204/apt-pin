@@ -16,6 +16,10 @@ KAKAO_API_KEY = os.getenv('KAKAO_API_KEY')
 _raw_datagokr_key = os.getenv('DATAGOKR_API_KEY')
 DATAGOKR_API_KEY = urllib.parse.unquote(_raw_datagokr_key) if _raw_datagokr_key else None
 CACHE_FILE_PATH = 'data/address_cache.json'
+# 허가 크롤러가 구별로 조회 가능한 최대 기간을 매번 처음부터 탐색하지 않도록,
+# 지난 실행에서 통했던 기간을 저장해둔다. 실제 허가/실거래 데이터는 여기 없다 -
+# "어느 정도 기간을 조회해야 하는지"에 대한 탐색 파라미터만 캐시한다.
+PERMIT_WINDOW_CACHE_PATH = 'data/permit_window_cache.json'
 TRADE_DATA_FILE_PATH = 'data/trades.json'
 PERMIT_DATA_FILE_PATH = 'data/permits.json'
 APT_TRADE_URL = "https://apis.data.go.kr/1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade"
@@ -68,8 +72,12 @@ LAWD_CD = [
 SEOUL_DISTRICTS = [d for d in LAWD_CD if d['code'].startswith('11')]
 
 REQUEST_TIMEOUT_SECONDS = 15
-PAGE_CONCURRENCY = 5      # 국토부 실거래가 API 페이지네이션 동시 요청 수
+PAGE_CONCURRENCY = 3      # 국토부 실거래가 API 페이지네이션 동시 요청 수
 GEOCODE_CONCURRENCY = 8   # 카카오 지오코딩 API 동시 요청 수 (두 크롤러가 공유)
+# 실제 실행에서 72개 구를 다 돌면 뒷부분(특히 경기도)에서 429(요청 과다)가 나는 걸 확인해서
+# 재시도로 흡수한다. 백오프 시간은 1초, 2초, 4초로 늘어난다.
+RATE_LIMIT_MAX_RETRIES = 5
+RATE_LIMIT_BACKOFF_BASE = 2
 
 # 토지거래허가는 구별/날짜별로 조회 가능한 최대 기간이 달라서(초과 시 에러 응답) 탐색으로 찾는다.
 # 60일에서 10일 단위로 좁혀가며 첫 성공 지점을 찾고, 거기서 1일 단위로 넓혀가며
@@ -97,25 +105,25 @@ async def fetch_post(session, url, data=None, json_body=None, headers=None):
         return None
 
 
-# -------------------- 캐시 파일 입출력 (공용) -------------------- #
-def load_address_cache(path):
+# -------------------- 캐시 파일 입출력 (공용, 딕셔너리 형태 캐시는 전부 이 형식) -------------------- #
+def load_json_cache(path):
     if not os.path.exists(path):
-        print("기존 캐시 파일 없음. 새로 시작합니다.")
+        print(f"기존 캐시 파일 없음 ({path}). 새로 시작합니다.")
         return {}
     try:
         with open(path, 'r', encoding='utf-8') as f:
             cache = json.load(f)
-        print(f"기존 캐시 로드 완료: {len(cache)}개 주소")
+        print(f"기존 캐시 로드 완료 ({path}): {len(cache)}개")
         return cache
     except (json.JSONDecodeError, OSError) as e:
-        print(f"캐시 파일 로드 실패 (새로 시작): {e}")
+        print(f"캐시 파일 로드 실패 ({path}, 새로 시작): {e}")
         return {}
 
 
-def save_address_cache(path, cache):
+def save_json_cache(path, cache):
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(cache, f, ensure_ascii=False, indent=2)
-    print(f"캐시 파일 저장 완료: {path}")
+    print(f"캐시 파일 저장 완료: {path} ({len(cache)}개)")
 
 
 def save_data(path, data):
@@ -190,17 +198,28 @@ def parse_xml_items(xml_text):
     return root, items
 
 
-async def fetch_page(session, semaphore, url, params):
+async def fetch_page(session, semaphore, url, params, max_retries=RATE_LIMIT_MAX_RETRIES):
     async with semaphore:
-        try:
-            async with session.get(url, params=params) as response:
-                if response.status != 200:
-                    print(f"[오류] {params['pageNo']}페이지 통신 실패 (상태 코드: {response.status})")
-                    return None, []
-                text = await response.text()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            print(f"[오류] {params['pageNo']}페이지 요청 실패: {e}")
-            return None, []
+        text = None
+        for attempt in range(max_retries + 1):
+            try:
+                async with session.get(url, params=params) as response:
+                    if response.status == 429:
+                        if attempt < max_retries:
+                            wait = RATE_LIMIT_BACKOFF_BASE * (2 ** attempt)
+                            print(f"[재시도] {params['pageNo']}페이지 429(요청 과다), {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
+                            await asyncio.sleep(wait)
+                            continue
+                        print(f"[오류] {params['pageNo']}페이지 429(요청 과다) 재시도 초과")
+                        return None, []
+                    if response.status != 200:
+                        print(f"[오류] {params['pageNo']}페이지 통신 실패 (상태 코드: {response.status})")
+                        return None, []
+                    text = await response.text()
+                    break
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                print(f"[오류] {params['pageNo']}페이지 요청 실패: {e}")
+                return None, []
 
     try:
         return parse_xml_items(text)
@@ -350,17 +369,38 @@ async def find_widest_successful_window(attempt, initial_days, coarse_step, fine
     return best_days, best_result
 
 
-async def fetch_district_permits(session, district, today):
+async def fetch_district_permits(session, district, today, window_cache):
+    """조회 가능한 최대 기간을 찾는다. 하루 3회씩 매번 15번 안팎으로 탐색하는 대신,
+    지난 실행에서 통했던 기간(window_cache)을 먼저 시도한다 - 이건 데이터가 아니라
+    "탐색 파라미터"라 캐시해도 결과 데이터의 실시간성에는 영향이 없다.
+    """
     async def attempt(lookback_days):
         result = await _try_fetch_permits(session, district, today, lookback_days)
         if result is None:
             print(f"{district['code']} {district['kor_name']} {lookback_days}일 로드 실패")
         return result
 
+    cached_days = window_cache.get(district['code'])
+    if cached_days:
+        cached_result = await attempt(cached_days)
+        if cached_result is not None:
+            # 하루 지날 때마다 실제 허용 범위가 넓어질 수 있어 1일만 더 넓혀서 확인해본다.
+            wider_days = min(cached_days + 1, PERMIT_INITIAL_LOOKBACK_DAYS)
+            wider_result = await attempt(wider_days) if wider_days > cached_days else None
+            if wider_result is not None:
+                window_cache[district['code']] = wider_days
+                print(f"{district['code']} {district['kor_name']} 캐시된 조회기간 +1일 확인: {wider_days}일")
+                return wider_result
+            window_cache[district['code']] = cached_days
+            print(f"{district['code']} {district['kor_name']} 캐시된 조회기간 재사용: {cached_days}일")
+            return cached_result
+        print(f"{district['code']} {district['kor_name']} 캐시된 조회기간({cached_days}일) 실패, 전체 재탐색")
+
     best_days, best_result = await find_widest_successful_window(
         attempt, PERMIT_INITIAL_LOOKBACK_DAYS, PERMIT_COARSE_STEP_DAYS
     )
     if best_result:
+        window_cache[district['code']] = best_days
         print(f"{district['code']} {district['kor_name']} 최대 조회기간 {best_days}일")
     return best_result or []
 
@@ -390,8 +430,8 @@ async def geocode_permit_records(session, records, cache, stats, semaphore):
     return geocoded
 
 
-async def process_district_permit(session, district, today, geocode_semaphore, cache, stats):
-    records = await fetch_district_permits(session, district, today)
+async def process_district_permit(session, district, today, geocode_semaphore, cache, stats, window_cache):
+    records = await fetch_district_permits(session, district, today, window_cache)
     residential = filter_residential_permits(records)
 
     # 서울시 API는 ADDRESS를 이미 "구 동 지번" 형태로 내려준다. 실거래 데이터와 형식을
@@ -403,12 +443,14 @@ async def process_district_permit(session, district, today, geocode_semaphore, c
     return await geocode_permit_records(session, residential, cache, stats, geocode_semaphore)
 
 
-async def crawl_permits(session, geocode_semaphore, cache, stats):
+async def crawl_permits(session, geocode_semaphore, cache, stats, window_cache):
     today = date.today()
     data = []
     for district in SEOUL_DISTRICTS:
         try:
-            geocoded = await process_district_permit(session, district, today, geocode_semaphore, cache, stats)
+            geocoded = await process_district_permit(
+                session, district, today, geocode_semaphore, cache, stats, window_cache
+            )
         except (KeyError, ValueError, TypeError, aiohttp.ClientError, asyncio.TimeoutError) as e:
             print(f"[오류] {district['code']} {district['kor_name']} 허가 처리 실패, 건너뜀: {e}")
             continue
@@ -425,7 +467,8 @@ async def main():
     if not DATAGOKR_API_KEY:
         raise SystemExit("DATAGOKR_API_KEY 환경변수가 설정되지 않았습니다.")
 
-    cache = load_address_cache(CACHE_FILE_PATH)
+    cache = load_json_cache(CACHE_FILE_PATH)
+    window_cache = load_json_cache(PERMIT_WINDOW_CACHE_PATH)
     trade_stats = {"api_call": 0, "cache_hit": 0}
     permit_stats = {"api_call": 0, "cache_hit": 0}
 
@@ -436,7 +479,7 @@ async def main():
     async with aiohttp.ClientSession(timeout=timeout) as session:
         trade_data, permit_data = await asyncio.gather(
             crawl_trades(session, page_semaphore, geocode_semaphore, cache, trade_stats),
-            crawl_permits(session, geocode_semaphore, cache, permit_stats),
+            crawl_permits(session, geocode_semaphore, cache, permit_stats, window_cache),
         )
 
     print(f"실거래 완료: API 호출 {trade_stats['api_call']}회, 캐시 사용 {trade_stats['cache_hit']}회")
@@ -444,7 +487,8 @@ async def main():
 
     save_data(TRADE_DATA_FILE_PATH, trade_data)
     save_data(PERMIT_DATA_FILE_PATH, permit_data)
-    save_address_cache(CACHE_FILE_PATH, cache)
+    save_json_cache(CACHE_FILE_PATH, cache)
+    save_json_cache(PERMIT_WINDOW_CACHE_PATH, window_cache)
 
 
 if __name__ == "__main__":

@@ -228,3 +228,9 @@ body { margin: 0; padding: 0; font-family: 'Noto Sans KR', sans-serif; -webkit-t
 .permit-list { list-style: none; padding: 0; margin: 8px 0 0; border-top: 1px dashed #ddd; }
 .permit-item { padding: 8px 0; border-bottom: 1px solid #f1f1f1; font-size: 13px; display: flex; justify-content: space-between; color: #555; }
 .permit-date { color: #888; font-size: 12px; }
+
+.popup-chart { display: block; margin-top: 4px; }
+.popup-chart-legend { display: flex; gap: 14px; font-size: 11px; color: #888; margin-top: 2px; }
+.legend-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+.legend-line { background: #2c8ec9; }
+.legend-bar { background: #8e5cd9; opacity: 0.6; border-radius: 2px; }
