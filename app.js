@@ -119,7 +119,9 @@ function updateChoropleth(layer, stats, hideEmpty) {
         }
         if (!layer.hasLayer(featureLayer)) layer.addLayer(featureLayer);
 
-        featureLayer.setStyle({ fillColor: choroColorScale(count, breaks), fillOpacity: count > 0 ? 0.65 : 0.35 });
+        // 마커 단계에서 테두리만 남기고 색을 뺐다가(줌아웃 없이) 다시 복원할 때 쓸 값을 기억해둔다
+        featureLayer._choroFillOpacity = count > 0 ? 0.65 : 0.35;
+        featureLayer.setStyle({ fillColor: choroColorScale(count, breaks), fillOpacity: featureLayer._choroFillOpacity });
         featureLayer.setTooltipContent(
             `<span class="gu-name">${featureLayer._labelName}</span><span class="gu-count">${count}<span class="gu-unit">건</span></span>`
         );
@@ -145,27 +147,45 @@ function toggleFeatureLayer(featureLayer, group, shouldShow) {
     if (!shouldShow && isShown) group.removeLayer(featureLayer);
 }
 
+// 마커 단계(줌 >= MARKER_MIN_ZOOM)에서도 색칠은 빼고 구/동 경계선만 남겨서 보여준다.
+function applyChoroFeatureStyle(featureLayer, isOutline) {
+    featureLayer.setStyle({
+        fillOpacity: isOutline ? 0 : (featureLayer._choroFillOpacity ?? 0.35),
+        color: isOutline ? '#95a5a6' : '#fff',
+        weight: isOutline ? 1.5 : 2,
+    });
+}
+
 function updateZoomLayers() {
     const zoom = map.getZoom();
+    const isMarkerTier = zoom >= MARKER_MIN_ZOOM;
 
     // 시군구 코로플레스: 서울은 줌 12부터 동 코로플레스로 넘어가며 숨고, 경기도는 동 경계
-    // 데이터가 없어 마커가 나오는 줌(MARKER_MIN_ZOOM) 직전까지 계속 유지한다. 이렇게 해야
-    // "같은 줌인데 서울만 지역 색칠이 사라진다" 같은 지역별 불일치가 없어진다.
+    // 데이터가 없어 계속 표시하되(마커 단계부터는 테두리만) - 같은 줌에서 지역별로 다르게
+    // 보이지 않도록 한다.
     if (sigunguChoroLayer) {
         sigunguChoroLayer._allLayers.forEach(featureLayer => {
             const isSeoul = featureLayer.feature.properties.sido === '서울특별시';
-            const hideAtZoom = isSeoul ? SIGUNGU_MAX_ZOOM : MARKER_MIN_ZOOM;
-            toggleFeatureLayer(featureLayer, sigunguChoroLayer, zoom < hideAtZoom);
+            const shouldShow = isSeoul ? zoom < SIGUNGU_MAX_ZOOM : true;
+            toggleFeatureLayer(featureLayer, sigunguChoroLayer, shouldShow);
+            if (shouldShow) applyChoroFeatureStyle(featureLayer, isMarkerTier);
         });
-        toggleMapLayer(sigunguChoroLayer, zoom < MARKER_MIN_ZOOM);
+        toggleMapLayer(sigunguChoroLayer, true);
     }
 
-    toggleMapLayer(dongChoroLayer, zoom >= SIGUNGU_MAX_ZOOM && zoom < MARKER_MIN_ZOOM);
+    toggleMapLayer(dongChoroLayer, zoom >= SIGUNGU_MAX_ZOOM);
+    if (dongChoroLayer && zoom >= SIGUNGU_MAX_ZOOM) {
+        dongChoroLayer._allLayers.forEach(featureLayer => {
+            if (dongChoroLayer.hasLayer(featureLayer)) applyChoroFeatureStyle(featureLayer, isMarkerTier);
+        });
+    }
+
     map.getContainer().classList.toggle('map-hide-dong-count', zoom < DONG_COUNT_MIN_ZOOM);
+    map.getContainer().classList.toggle('map-outline-mode', isMarkerTier);
 
     // 서울·경기도 둘 다 같은 줌부터 개별 마커/클러스터로 전환한다
     Object.values(guClusterLayers).forEach(layer => {
-        toggleMapLayer(layer, zoom >= MARKER_MIN_ZOOM);
+        toggleMapLayer(layer, isMarkerTier);
     });
 }
 
