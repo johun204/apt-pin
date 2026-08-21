@@ -712,16 +712,28 @@ function buildPriceChart(trade, permit) {
 
     if (!allTradePoints.length && !permitEntries.length) return '';
 
-    const maxPrice = Math.max(1, ...allTradePoints.map(p => p.price));
-    const yPrice = (price) => chartBottom - (price / maxPrice) * (chartBottom - chartTop);
-    const maxPermitCount = Math.max(1, ...permitEntries.map(p => p.count));
+    // 가격은 0원부터가 아니라 이 기간·이 단지의 실제 최저가부터 시작하고, 위아래 다 살짝
+    // 여유를 둬서 선이 그래프 꽉 채우듯 위/아래에 딱 붙지 않게 한다.
+    const rawMinPrice = allTradePoints.length ? Math.min(...allTradePoints.map(p => p.price)) : 0;
+    const rawMaxPrice = allTradePoints.length ? Math.max(...allTradePoints.map(p => p.price)) : 1;
+    const priceRange = rawMaxPrice - rawMinPrice;
+    const pricePadding = priceRange > 0 ? priceRange * 0.15 : Math.max(rawMaxPrice * 0.1, 0.1);
+    const minPrice = Math.max(0, rawMinPrice - pricePadding);
+    const maxPrice = rawMaxPrice + pricePadding;
+    const priceSpan = Math.max(0.01, maxPrice - minPrice);
+    const yPrice = (price) => chartBottom - ((price - minPrice) / priceSpan) * (chartBottom - chartTop);
+
+    // 허가 건수도 실제 최고 건수를 축의 끝에 딱 맞추지 않고 1건 정도 여유를 둔다(막대가 항상
+    // 맨 위보다 낮게 그려진다).
+    const rawMaxPermitCount = Math.max(0, ...permitEntries.map(p => p.count));
+    const maxPermitCount = rawMaxPermitCount + 1;
     const yCount = (count) => chartBottom - (count / maxPermitCount) * (chartBottom - chartTop);
     const barWidth = 5;
 
-    // 가로 기준선 3단: 각 단지/마커의 실제 최고가·최고건수에 맞춰 매번 새로 계산한다(고정 눈금 아님)
+    // 가로 기준선 3단: 각 단지/마커의 실제 가격·건수 범위에 맞춰 매번 새로 계산한다(고정 눈금 아님)
     const gridLines = [0, 0.5, 1].map(frac => {
         const y = chartBottom - frac * (chartBottom - chartTop);
-        return { y, price: Math.round(maxPrice * frac), count: Math.round(maxPermitCount * frac) };
+        return { y, price: Math.round(minPrice + frac * priceSpan), count: Math.round(frac * maxPermitCount) };
     });
     const gridHtml = gridLines.map(g => `
         <line x1="${chartLeft}" y1="${g.y.toFixed(1)}" x2="${chartRight}" y2="${g.y.toFixed(1)}" stroke="#eee" stroke-width="1" />
