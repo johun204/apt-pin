@@ -69,7 +69,7 @@ function computeDongStats(aggregated) {
     });
 }
 
-function createChoroLayer(geojson, getKey, getLabel, extraTooltipClass) {
+function createChoroLayer(geojson, getKey, getLabel, extraTooltipClass, zoomToMarkersOnClick) {
     const tooltipClass = extraTooltipClass ? `gu-tooltip ${extraTooltipClass}` : 'gu-tooltip';
     const group = L.geoJSON(geojson, {
         style: () => ({ color: '#fff', weight: 2, fillColor: '#dfe6e9', fillOpacity: 0.35 }),
@@ -80,14 +80,28 @@ function createChoroLayer(geojson, getKey, getLabel, extraTooltipClass) {
                 `<span class="gu-name">${layer._labelName}</span><span class="gu-count">-<span class="gu-unit">건</span></span>`,
                 { permanent: true, direction: 'center', className: tooltipClass, interactive: false }
             );
-            layer.on('click', () => map.flyToBounds(layer.getBounds(), { padding: [20, 20] }));
+            layer.on('click', () => {
+                const bounds = layer.getBounds();
+                if (zoomToMarkersOnClick) {
+                    // flyToBounds만 쓰면 면적이 큰 동은 오히려 축소되기도 해서, 마커가 보이는
+                    // 줌보다 낮아지지 않게 최소값을 못박는다(작은 동은 더 확대해도 됨).
+                    const fitZoom = map.getBoundsZoom(bounds, false);
+                    map.flyTo(bounds.getCenter(), Math.max(fitZoom, MARKER_MIN_ZOOM));
+                } else {
+                    map.flyToBounds(bounds, { padding: [20, 20] });
+                }
+            });
             layer.on('mouseover', () => layer.setStyle({ weight: 3 }));
             layer.on('mouseout', () => layer.setStyle({ weight: 2 }));
         }
     });
-    // hideEmpty로 개별 폴리곤을 껐다 켰다 하면 eachLayer로는 더 이상 안 잡히므로 따로 보관해둔다
+    // hideEmpty로 개별 폴리곤을 껐다 켰다 하면 eachLayer로는 더 이상 안 잡히므로 따로 보관해둔다.
+    // bounds도 뷰포트 판정마다 다시 계산하지 않게 한 번만 구해서 캐싱해둔다(도형은 안 바뀌므로).
     group._allLayers = [];
-    group.eachLayer(featureLayer => group._allLayers.push(featureLayer));
+    group.eachLayer(featureLayer => {
+        featureLayer._cachedBounds = featureLayer.getBounds();
+        group._allLayers.push(featureLayer);
+    });
     return group;
 }
 
@@ -107,7 +121,8 @@ async function loadDongBoundaries() {
         geojson,
         f => `${f.properties.gu} ${f.properties.EMD_KOR_NM}`,
         f => f.properties.EMD_KOR_NM,
-        'dong-tooltip'
+        'dong-tooltip',
+        true
     );
 }
 
@@ -172,17 +187,28 @@ function applyChoroFeatureStyle(featureLayer, zoom) {
     });
 }
 
+// 화면에 다 안 보이는 폴리곤까지 전부 그리면 모바일에서 부담이 커서, 현재 보이는 영역 +
+// 여유 영역(화면 크기의 50%)에 걸치는 폴리곤만 실제로 지도에 올린다. 팬/줌이 끝날 때마다
+// 다시 계산해서, 화면 경계에 걸쳐 있는 지역은 항상 포함되게 한다.
+const VIEWPORT_BUFFER_RATIO = 0.5;
+
+function getBufferedViewBounds() {
+    return map.getBounds().pad(VIEWPORT_BUFFER_RATIO);
+}
+
 function updateZoomLayers() {
     const zoom = map.getZoom();
     const isMarkerTier = zoom >= MARKER_MIN_ZOOM;
+    const viewBounds = getBufferedViewBounds();
 
     // 시군구 코로플레스: 서울은 줌 12부터 동 코로플레스로 넘어가며 숨고, 경기도는 동 경계
     // 데이터가 없어 계속 표시하되(마커 단계부터는 테두리만) - 같은 줌에서 지역별로 다르게
-    // 보이지 않도록 한다.
+    // 보이지 않도록 한다. 뷰포트 밖 폴리곤은 조건을 만족해도 지도에 올리지 않는다.
     if (sigunguChoroLayer) {
         sigunguChoroLayer._allLayers.forEach(featureLayer => {
             const isSeoul = featureLayer.feature.properties.sido === '서울특별시';
-            const shouldShow = isSeoul ? zoom < SIGUNGU_MAX_ZOOM : true;
+            const zoomShouldShow = isSeoul ? zoom < SIGUNGU_MAX_ZOOM : true;
+            const shouldShow = zoomShouldShow && viewBounds.intersects(featureLayer._cachedBounds);
             toggleFeatureLayer(featureLayer, sigunguChoroLayer, shouldShow);
             if (shouldShow) applyChoroFeatureStyle(featureLayer, zoom);
         });
@@ -191,7 +217,11 @@ function updateZoomLayers() {
 
     toggleMapLayer(dongChoroLayer, zoom >= SIGUNGU_MAX_ZOOM);
     if (dongChoroLayer && zoom >= SIGUNGU_MAX_ZOOM) {
-        dongChoroLayer._allLayers.forEach(featureLayer => applyChoroFeatureStyle(featureLayer, zoom));
+        dongChoroLayer._allLayers.forEach(featureLayer => {
+            const shouldShow = viewBounds.intersects(featureLayer._cachedBounds);
+            toggleFeatureLayer(featureLayer, dongChoroLayer, shouldShow);
+            if (shouldShow) applyChoroFeatureStyle(featureLayer, zoom);
+        });
     }
 
     map.getContainer().classList.toggle('map-hide-dong-count', zoom < DONG_COUNT_MIN_ZOOM);
@@ -205,16 +235,18 @@ function updateZoomLayers() {
     });
 }
 
-map.on('zoomend', updateZoomLayers);
+// moveend는 팬/줌 등 지도 뷰가 바뀌는 모든 경우 끝에 한 번 발생한다(zoomend의 상위 이벤트라
+// zoomend까지 같이 걸면 줌 할 때마다 두 번 실행된다).
+map.on('moveend', updateZoomLayers);
 
 let guClusterLayers = {};
 
 function createClusterGroup() {
     return L.markerClusterGroup({
         chunkedLoading: true,
-        // 핀 아이콘 폭이 32px이라, 그 정도로 실제 겹칠 때만 뭉치고 어느 정도 떨어져 있으면
-        // 개별 핀으로 보이게 반경을 줄였다(기존 60px은 너무 멀리서도 뭉쳐 보였음).
-        maxClusterRadius: 30,
+        // 핀끼리 실제로 겹칠 정도로 가까울 때만 뭉치도록 더 줄였다(30px도 여전히 너무 멀리서
+        // 뭉쳐 보인다는 피드백 반영, 핀 폭 32px의 절반 수준).
+        maxClusterRadius: 15,
         disableClusteringAtZoom: 18,
         iconCreateFunction: function(cluster) {
             const children = cluster.getAllChildMarkers();
@@ -351,6 +383,7 @@ function toggleRankingPanel() {
     if (panel.style.display === 'flex') {
         panel.style.display = 'none';
     } else {
+        toggleSearchMode(false); // 검색 중이었다면 랭킹과 겹치지 않게 닫는다
         panel.style.display = 'flex';
         renderRankingContent();
     }
@@ -530,6 +563,7 @@ function toggleSearchMode(isSearch) {
     const searchResults = document.getElementById('searchResults');
 
     if (isSearch) {
+        document.getElementById('rankingPanel').style.display = 'none'; // 랭킹과 겹치지 않게 닫는다
         filterGroup.style.display = 'none';
         searchGroup.style.display = 'flex';
         searchInput.focus();

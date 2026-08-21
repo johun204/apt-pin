@@ -1,6 +1,6 @@
 {
-  "name": "부동산레이더",
-  "short_name": "부동산레이더",
+  "name": "부동산핀",
+  "short_name": "부동산핀",
   "start_url": "/real-estate-map",
   "display": "standalone",
   "background_color": "#ffffff",

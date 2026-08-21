@@ -80,9 +80,10 @@ RATE_LIMIT_MAX_RETRIES = 5
 RATE_LIMIT_BACKOFF_BASE = 2
 
 # 토지거래허가는 구별/날짜별로 조회 가능한 최대 기간이 달라서(초과 시 에러 응답) 탐색으로 찾는다.
-# 60일에서 10일 단위로 좁혀가며 첫 성공 지점을 찾고, 거기서 1일 단위로 넓혀가며
-# 실제 최대 허용 기간을 찾는다.
-PERMIT_INITIAL_LOOKBACK_DAYS = 60
+# 90일에서 10일 단위로 좁혀가며 첫 성공 지점을 찾고, 거기서 1일 단위로 넓혀가며
+# 실제 최대 허용 기간을 찾는다. (프론트 90일 필터와 맞춤. 실거래는 이미 3개월치를 받아오고 있어
+# 그대로 두고, 허가만 60일로 묶여 있어서 여기를 늘렸다.)
+PERMIT_INITIAL_LOOKBACK_DAYS = 90
 PERMIT_COARSE_STEP_DAYS = 10
 PERMIT_FINE_STEP_DAYS = 1
 
