@@ -191,12 +191,10 @@ body { margin: 0; padding: 0; font-family: 'Noto Sans KR', sans-serif; -webkit-t
 .gu-tooltip::before { display: none; }
 .gu-tooltip .gu-name { display: block; font-size: 12px; font-weight: 700; color: #2c3e50; }
 .gu-tooltip .gu-count { display: block; font-size: 15px; font-weight: 900; color: #2c3e50; }
-/* 동 폴리곤은 구보다 훨씬 작아서 이름 폰트를 줄이고, 축소된 상태에서는 이름 자체를 숨긴다 */
+/* 동 폴리곤은 구보다 훨씬 작아서 이름 폰트를 줄인다. 축소된 상태에서는 동 이름만 작게
+   보여주고, 더 확대해야 건수("N건")까지 보여준다. */
 .dong-tooltip .gu-name { font-size: 9px; }
-.map-hide-dong-name .dong-tooltip .gu-name { display: none; }
-/* 숫자만 표시하는 상태에서는 "건" 단위도 빼고 숫자 자체도 더 작게 */
-.map-hide-dong-name .dong-tooltip .gu-unit { display: none; }
-.map-hide-dong-name .dong-tooltip .gu-count { font-size: 11px; }
+.map-hide-dong-count .dong-tooltip .gu-count { display: none; }
 .custom-cluster-icon {
     background: rgba(46, 204, 113, 0.9);
     color: white; border: 2px solid white; border-radius: 50%;
@@ -214,7 +212,7 @@ body { margin: 0; padding: 0; font-family: 'Noto Sans KR', sans-serif; -webkit-t
 }
 
 .leaflet-popup-content-wrapper { border-radius: 12px; padding: 0; overflow: hidden; }
-.leaflet-popup-content { margin: 0; width: 310px !important; }
+.leaflet-popup-content { margin: 0; width: 320px !important; }
 .popup-header { background: #2c3e50; color: white; padding: 15px; }
 .popup-header h3 { margin: 0; font-size: 16px; font-weight: 700; }
 .popup-header p { margin: 5px 0 0; font-size: 12px; opacity: 0.8; }
@@ -228,16 +226,23 @@ body { margin: 0; padding: 0; font-family: 'Noto Sans KR', sans-serif; -webkit-t
     display: flex; align-items: center; gap: 6px;
 }
 
-.trade-list { list-style: none; padding: 0; margin: 8px 0 0; border-top: 1px dashed #ddd; }
-.trade-item { padding: 8px 0; border-bottom: 1px solid #f1f1f1; font-size: 13px; display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; align-items: center; text-align: center; color: #555; }
-.trade-date { color: #888; font-size: 12px; }
-
-.permit-list { list-style: none; padding: 0; margin: 8px 0 0; border-top: 1px dashed #ddd; }
-.permit-item { padding: 8px 0; border-bottom: 1px solid #f1f1f1; font-size: 13px; display: flex; justify-content: space-between; color: #555; }
-.permit-date { color: #888; font-size: 12px; }
+/* 실거래+허가 통합 내역 목록 (계약일 내림차순) */
+.history-list { list-style: none; padding: 0; margin: 8px 0 0; border-top: 1px dashed #ddd; }
+.history-item {
+    padding: 8px 0; border-bottom: 1px solid #f1f1f1; font-size: 13px;
+    display: flex; align-items: center; gap: 8px; color: #555;
+}
+.history-icon {
+    flex: 0 0 20px; width: 20px; height: 20px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; color: #fff;
+}
+.history-icon-trade { background: #2c8ec9; }
+.history-icon-permit { background: #8e5cd9; }
+.history-detail { flex: 1; }
+.history-date { color: #888; font-size: 12px; white-space: nowrap; }
 
 .popup-chart { display: block; margin-top: 4px; }
-.popup-chart-legend { display: flex; gap: 14px; font-size: 11px; color: #888; margin-top: 2px; }
+.popup-chart-legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: #888; margin-top: 2px; }
 .legend-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
-.legend-line { background: #2c8ec9; }
 .legend-bar { background: #8e5cd9; opacity: 0.6; border-radius: 2px; }

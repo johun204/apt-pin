@@ -17,11 +17,12 @@ function keyOf(lat, lng) {
     return `${parseFloat(lat).toFixed(6)}|${parseFloat(lng).toFixed(6)}`;
 }
 
-// 줌 12 미만: 시군구 색칠 지도 / 12~15: (서울만) 동 색칠 지도 / 그 이상은 개별 마커·클러스터
-// 경기도는 동 단위 경계 데이터가 없어 시군구 다음 바로 마커로 전환된다.
+// 줌 12 미만: 시군구 색칠 지도(서울+경기도 전부) / 12~15: 지역 단위 색칠 지도(서울은 동,
+// 경기도는 동 경계 데이터가 없어 시군구를 계속 유지) / 15 이상: 서울·경기도 동일하게 개별 마커·클러스터.
+// 마커 등장 줌을 두 지역 다 똑같이 맞춰서, 어느 지역이든 같은 축척에서 같은 종류의 화면이 보이게 한다.
 const SIGUNGU_MAX_ZOOM = 12;
-const DONG_MAX_ZOOM = 15;
-const DONG_NAME_MIN_ZOOM = 14;
+const MARKER_MIN_ZOOM = 15;
+const DONG_COUNT_MIN_ZOOM = 14;
 let sigunguChoroLayer = null;
 let dongChoroLayer = null;
 // LAWD 코드(sggCd) -> 시군구 표시 이름. sigungu.geojson 로드 시 채워지며 실거래/허가 둘 다 공유한다.
@@ -138,16 +139,33 @@ function toggleMapLayer(layer, shouldShow) {
     if (!shouldShow && isShown) map.removeLayer(layer);
 }
 
+function toggleFeatureLayer(featureLayer, group, shouldShow) {
+    const isShown = group.hasLayer(featureLayer);
+    if (shouldShow && !isShown) group.addLayer(featureLayer);
+    if (!shouldShow && isShown) group.removeLayer(featureLayer);
+}
+
 function updateZoomLayers() {
     const zoom = map.getZoom();
-    toggleMapLayer(sigunguChoroLayer, zoom < SIGUNGU_MAX_ZOOM);
-    toggleMapLayer(dongChoroLayer, zoom >= SIGUNGU_MAX_ZOOM && zoom < DONG_MAX_ZOOM);
-    map.getContainer().classList.toggle('map-hide-dong-name', zoom < DONG_NAME_MIN_ZOOM);
 
-    // 서울은 동 단계를 거쳐 줌 15부터, 경기도는 동 경계가 없어 시군구 다음(줌 12)부터 바로 마커 표시
+    // 시군구 코로플레스: 서울은 줌 12부터 동 코로플레스로 넘어가며 숨고, 경기도는 동 경계
+    // 데이터가 없어 마커가 나오는 줌(MARKER_MIN_ZOOM) 직전까지 계속 유지한다. 이렇게 해야
+    // "같은 줌인데 서울만 지역 색칠이 사라진다" 같은 지역별 불일치가 없어진다.
+    if (sigunguChoroLayer) {
+        sigunguChoroLayer._allLayers.forEach(featureLayer => {
+            const isSeoul = featureLayer.feature.properties.sido === '서울특별시';
+            const hideAtZoom = isSeoul ? SIGUNGU_MAX_ZOOM : MARKER_MIN_ZOOM;
+            toggleFeatureLayer(featureLayer, sigunguChoroLayer, zoom < hideAtZoom);
+        });
+        toggleMapLayer(sigunguChoroLayer, zoom < MARKER_MIN_ZOOM);
+    }
+
+    toggleMapLayer(dongChoroLayer, zoom >= SIGUNGU_MAX_ZOOM && zoom < MARKER_MIN_ZOOM);
+    map.getContainer().classList.toggle('map-hide-dong-count', zoom < DONG_COUNT_MIN_ZOOM);
+
+    // 서울·경기도 둘 다 같은 줌부터 개별 마커/클러스터로 전환한다
     Object.values(guClusterLayers).forEach(layer => {
-        const markerMinZoom = layer._region === 'seoul' ? DONG_MAX_ZOOM : SIGUNGU_MAX_ZOOM;
-        toggleMapLayer(layer, zoom >= markerMinZoom);
+        toggleMapLayer(layer, zoom >= MARKER_MIN_ZOOM);
     });
 }
 
@@ -575,51 +593,72 @@ function buildPinIcon(pt) {
     });
 }
 
-function buildTradeSection(trade) {
-    const rows = trade.history.map(h => `
-        <li class="trade-item">
-            <span>${escapeHtml(h.excluUseAr)}</span>
-            <span>${escapeHtml(h.floor)}층</span>
-            <span>${formatToUk(h.dealAmount)}</span>
-            <span class="trade-date">${formatDate(h.date)}</span>
-        </li>
-    `).join('');
+// 실거래/허가 이력을 종류 구분 없이 계약일(발생일) 내림차순 한 목록으로 합친다.
+function buildCombinedHistorySection(trade, permit) {
+    const rows = [
+        ...(trade ? trade.history.map(h => ({ type: 'trade', date: h.date, h })) : []),
+        ...(permit ? permit.history.map(h => ({ type: 'permit', date: h.date, h })) : []),
+    ].sort((a, b) => b.date.localeCompare(a.date));
+
+    if (!rows.length) return '';
+
+    const rowsHtml = rows.map(r => {
+        if (r.type === 'trade') {
+            return `
+                <li class="history-item">
+                    <span class="history-icon history-icon-trade"><i class="fa-solid fa-won-sign"></i></span>
+                    <span class="history-detail">${escapeHtml(r.h.excluUseAr)}㎡ · ${escapeHtml(r.h.floor)}층 · ${formatToUk(r.h.dealAmount)}</span>
+                    <span class="history-date">${formatDate(r.date)}</span>
+                </li>`;
+        }
+        return `
+            <li class="history-item">
+                <span class="history-icon history-icon-permit"><i class="fa-solid fa-stamp"></i></span>
+                <span class="history-detail">토지거래허가</span>
+                <span class="history-date">${formatDate(r.date)}</span>
+            </li>`;
+    }).join('');
+
+    const totalCount = (trade ? trade.count : 0) + (permit ? permit.count : 0);
 
     return `
         <div class="popup-section">
-            <div class="popup-section-title"><i class="fa-solid fa-won-sign"></i> 실거래가 ${trade.count}건</div>
-            <ul class="trade-list">
-              <li class="trade-item">
-                <span>전용면적</span>
-                <span>층수</span>
-                <span>가격</span>
-                <span class="trade-date">계약일</span>
-              </li>
-              ${rows}</ul>
-        </div>
-    `;
-}
-
-function buildPermitSection(permit) {
-    const rows = permit.history.map(h => `
-        <li class="permit-item">
-            <span>${escapeHtml(h.place_name)}</span>
-            <span class="permit-date">${formatDate(h.date)}</span>
-        </li>
-    `).join('');
-
-    return `
-        <div class="popup-section">
-            <div class="popup-section-title"><i class="fa-solid fa-stamp"></i> 토지거래허가 ${permit.count}건</div>
-            <ul class="permit-list">${rows}</ul>
+            <div class="popup-section-title"><i class="fa-solid fa-list"></i> 전체 내역 ${totalCount}건</div>
+            <ul class="history-list">${rowsHtml}</ul>
         </div>
     `;
 }
 
 // 선택된 기간(60/30/7일) x축 위에 실거래가는 꺾은선, 허가 건수는 막대로 겹쳐 보여준다.
+const AREA_LINE_COLORS = ['#2c8ec9', '#e8555a', '#27ae60', '#f5a623', '#8e5cd9', '#16a2b8', '#d35400'];
+
+function groupTradePointsByArea(history) {
+    const groups = {};
+    history.forEach(h => {
+        const d = parseDateString(h.date);
+        if (!d) return;
+        const area = h.excluUseAr || '기타';
+        (groups[area] = groups[area] || []).push({ d, price: dealAmountToUk(h.dealAmount) });
+    });
+    return Object.keys(groups)
+        .sort((a, b) => parseFloat(a) - parseFloat(b))
+        .map(area => ({ area, points: groups[area].sort((a, b) => a.d - b.d) }));
+}
+
+function buildMonthTicks(startDate, endDate) {
+    const ticks = [];
+    const cur = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
+    while (cur <= endDate) {
+        if (cur >= startDate) ticks.push(new Date(cur));
+        cur.setMonth(cur.getMonth() + 1);
+    }
+    return ticks.length ? ticks : [new Date(startDate)];
+}
+
 function buildPriceChart(trade, permit) {
-    const width = 274, height = 110;
-    const padTop = 10, padBottom = 6, padX = 6;
+    const width = 290, height = 128;
+    const padLeft = 24, padRight = 24, padTop = 8, padBottom = 14;
+    const chartLeft = padLeft, chartRight = width - padRight;
     const chartTop = padTop, chartBottom = height - padBottom;
 
     const now = tradeLastUpdatedText ? tradeLastUpdated : permitLastUpdated;
@@ -636,12 +675,10 @@ function buildPriceChart(trade, permit) {
     }
 
     const span = Math.max(1, now.getTime() - startDate.getTime());
-    const xScale = (d) => padX + ((d.getTime() - startDate.getTime()) / span) * (width - padX * 2);
+    const xScale = (d) => chartLeft + ((d.getTime() - startDate.getTime()) / span) * (chartRight - chartLeft);
 
-    const tradePoints = (trade ? trade.history : [])
-        .map(h => ({ d: parseDateString(h.date), price: dealAmountToUk(h.dealAmount) }))
-        .filter(p => p.d)
-        .sort((a, b) => a.d - b.d);
+    const areaGroups = trade ? groupTradePointsByArea(trade.history) : [];
+    const allTradePoints = areaGroups.flatMap(g => g.points);
 
     const permitByDay = {};
     (permit ? permit.history : []).forEach(h => {
@@ -650,25 +687,46 @@ function buildPriceChart(trade, permit) {
     });
     const permitEntries = Object.entries(permitByDay).map(([dateStr, count]) => ({ d: parseDateString(dateStr), count }));
 
-    if (!tradePoints.length && !permitEntries.length) return '';
+    if (!allTradePoints.length && !permitEntries.length) return '';
 
-    const maxPrice = Math.max(1, ...tradePoints.map(p => p.price));
+    const maxPrice = Math.max(1, ...allTradePoints.map(p => p.price));
     const yPrice = (price) => chartBottom - (price / maxPrice) * (chartBottom - chartTop);
     const maxPermitCount = Math.max(1, ...permitEntries.map(p => p.count));
-    const barAreaHeight = (chartBottom - chartTop) * 0.55;
+    const yCount = (count) => chartBottom - (count / maxPermitCount) * (chartBottom - chartTop);
     const barWidth = 5;
+
+    // 가로 기준선 3단: 각 단지/마커의 실제 최고가·최고건수에 맞춰 매번 새로 계산한다(고정 눈금 아님)
+    const gridLines = [0, 0.5, 1].map(frac => {
+        const y = chartBottom - frac * (chartBottom - chartTop);
+        return { y, price: Math.round(maxPrice * frac), count: Math.round(maxPermitCount * frac) };
+    });
+    const gridHtml = gridLines.map(g => `
+        <line x1="${chartLeft}" y1="${g.y.toFixed(1)}" x2="${chartRight}" y2="${g.y.toFixed(1)}" stroke="#eee" stroke-width="1" />
+        <text x="${chartLeft - 4}" y="${(g.y + 3).toFixed(1)}" text-anchor="end" font-size="8" fill="#999">${g.price}억</text>
+        <text x="${chartRight + 4}" y="${(g.y + 3).toFixed(1)}" text-anchor="start" font-size="8" fill="#999">${g.count}건</text>
+    `).join('');
+
+    const monthTicks = buildMonthTicks(startDate, now);
+    const monthHtml = monthTicks.map(t => `
+        <text x="${xScale(t).toFixed(1)}" y="${height - 2}" text-anchor="middle" font-size="8" fill="#999">${t.getMonth() + 1}월</text>
+    `).join('');
 
     const bars = permitEntries.map(p => {
         const x = xScale(p.d);
-        const barHeight = (p.count / maxPermitCount) * barAreaHeight;
-        return `<rect x="${(x - barWidth / 2).toFixed(1)}" y="${(chartBottom - barHeight).toFixed(1)}" width="${barWidth}" height="${barHeight.toFixed(1)}" fill="#8e5cd9" opacity="0.45" rx="1.5" />`;
+        const barTop = yCount(p.count);
+        return `<rect x="${(x - barWidth / 2).toFixed(1)}" y="${barTop.toFixed(1)}" width="${barWidth}" height="${(chartBottom - barTop).toFixed(1)}" fill="#8e5cd9" opacity="0.4" rx="1.5" />`;
     }).join('');
 
-    const linePath = tradePoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xScale(p.d).toFixed(1)} ${yPrice(p.price).toFixed(1)}`).join(' ');
-    const dots = tradePoints.map(p => `<circle cx="${xScale(p.d).toFixed(1)}" cy="${yPrice(p.price).toFixed(1)}" r="2.5" fill="#2c8ec9" />`).join('');
+    const lineGroups = areaGroups.map((group, i) => {
+        const color = AREA_LINE_COLORS[i % AREA_LINE_COLORS.length];
+        const path = group.points.map((p, j) => `${j === 0 ? 'M' : 'L'} ${xScale(p.d).toFixed(1)} ${yPrice(p.price).toFixed(1)}`).join(' ');
+        const dots = group.points.map(p => `<circle cx="${xScale(p.d).toFixed(1)}" cy="${yPrice(p.price).toFixed(1)}" r="2.5" fill="${color}" />`).join('');
+        const line = group.points.length > 1 ? `<path d="${path}" fill="none" stroke="${color}" stroke-width="2" />` : '';
+        return { color, line, dots };
+    });
 
     const legendItems = [
-        tradePoints.length ? '<span><i class="legend-dot legend-line"></i>실거래가</span>' : '',
+        ...areaGroups.map((g, i) => `<span><i class="legend-dot" style="background:${AREA_LINE_COLORS[i % AREA_LINE_COLORS.length]}"></i>${escapeHtml(g.area)}㎡</span>`),
         permitEntries.length ? '<span><i class="legend-dot legend-bar"></i>허가 건수</span>' : '',
     ].join('');
 
@@ -676,10 +734,11 @@ function buildPriceChart(trade, permit) {
         <div class="popup-section">
             <div class="popup-section-title"><i class="fa-solid fa-chart-line"></i> 기간 내 변동 추이</div>
             <svg class="popup-chart" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-                <line x1="${padX}" y1="${chartBottom}" x2="${width - padX}" y2="${chartBottom}" stroke="#eee" stroke-width="1" />
+                ${gridHtml}
                 ${bars}
-                ${tradePoints.length > 1 ? `<path d="${linePath}" fill="none" stroke="#2c8ec9" stroke-width="2" />` : ''}
-                ${dots}
+                ${lineGroups.map(g => g.line).join('')}
+                ${lineGroups.map(g => g.dots).join('')}
+                ${monthHtml}
             </svg>
             <div class="popup-chart-legend">${legendItems}</div>
         </div>
@@ -696,8 +755,8 @@ function buildPopupContent(key) {
     const sections = [];
     const chart = buildPriceChart(trade, permit);
     if (chart) sections.push(chart);
-    if (trade) sections.push(buildTradeSection(trade));
-    if (permit) sections.push(buildPermitSection(permit));
+    const history = buildCombinedHistorySection(trade, permit);
+    if (history) sections.push(history);
 
     return `
         <div class="popup-header">
@@ -721,7 +780,6 @@ function renderMarkers(points) {
         const guName = sigunguKeyOf(pt);
         if (!guClusterLayers[guName]) {
             guClusterLayers[guName] = createClusterGroup();
-            guClusterLayers[guName]._region = pt.sggCd && pt.sggCd.startsWith('11') ? 'seoul' : 'gg';
             map.addLayer(guClusterLayers[guName]);
         }
 
