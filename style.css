@@ -166,15 +166,23 @@ body { margin: 0; padding: 0; font-family: 'Noto Sans KR', sans-serif; -webkit-t
 
 /* --- 마커 및 기타 --- */
 .pin-marker {
-    position: relative; width: 34px; height: 44px;
-    filter: drop-shadow(0 3px 3px rgba(0,0,0,0.35));
+    position: relative; width: 32px; height: 40px;
     transition: transform 0.15s;
 }
-.pin-marker:hover { transform: translateY(-2px); }
-.pin-marker svg { display: block; }
-.pin-marker .pin-count {
-    position: absolute; top: 7px; left: 0; width: 34px;
-    text-align: center; font-size: 12px; font-weight: 800; color: #2c3e50;
+.pin-marker:hover { transform: translateY(-2px); z-index: 10000 !important; }
+.pin-marker svg { display: block; filter: drop-shadow(0 2px 3px rgba(0,0,0,0.35)); }
+.pin-marker .pin-label {
+    position: absolute; bottom: calc(100% + 4px); left: 50%;
+    transform: translateX(-50%);
+    max-width: 72px;
+    background: rgba(255,255,255,0.92);
+    color: #2c3e50; font-size: 10px; font-weight: 700; line-height: 1.25;
+    padding: 2px 6px; border-radius: 6px;
+    text-align: center; white-space: normal; word-break: break-all;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.25);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
 }
 .gu-tooltip {
     background: transparent; border: none; box-shadow: none; pointer-events: none;

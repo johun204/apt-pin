@@ -544,20 +544,34 @@ function aggregateData(points) {
     return Object.values(mapData);
 }
 
+// 모드별로 색 계열을 다르게 줘서(파랑=실거래, 보라=허가) 토글과 시각적으로 이어지게 한다.
+const PIN_COLORS = {
+    trade: { low: '#4a90d9', mid: '#f5a623', high: '#e8555a' },
+    permit: { low: '#8e5cd9', mid: '#f5a623', high: '#e8555a' },
+};
+
+function markerLabelText(pt) {
+    return pt.aptNm || pt.place_name || '';
+}
+
 function buildPinIcon(pt) {
-    const pinColor = pt.count >= 10 ? '#e74c3c' : (pt.count >= 3 ? '#f1c40f' : '#3498db');
+    const tier = pt.count >= 10 ? 'high' : (pt.count >= 3 ? 'mid' : 'low');
+    const pinColor = (PIN_COLORS[currentMode] || PIN_COLORS.trade)[tier];
+    const label = escapeHtml(markerLabelText(pt));
+
     return L.divIcon({
         html: `
-            <svg width="34" height="44" viewBox="0 0 34 44">
-                <path d="M17 0C7.6 0 0 7.6 0 17c0 12.7 17 27 17 27s17-14.3 17-27C34 7.6 26.4 0 17 0z" fill="${pinColor}" stroke="white" stroke-width="2"/>
-                <circle cx="17" cy="16" r="10.5" fill="white"/>
+            ${label ? `<div class="pin-label">${label}</div>` : ''}
+            <svg width="32" height="40" viewBox="0 0 32 40">
+                <path d="M9 19 L23 19 L16 38 Z" fill="${pinColor}"/>
+                <circle cx="16" cy="14" r="12" fill="${pinColor}" stroke="#fff" stroke-width="2.5"/>
+                <text x="16" y="18.5" text-anchor="middle" font-size="11" font-weight="800" fill="#fff">${pt.count}</text>
             </svg>
-            <div class="pin-count">${pt.count}</div>
         `,
         className: 'pin-marker',
-        iconSize: [34, 44],
-        iconAnchor: [17, 42],
-        popupAnchor: [0, -40]
+        iconSize: [32, 40],
+        iconAnchor: [16, 38],
+        popupAnchor: [0, -36]
     });
 }
 
