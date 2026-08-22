@@ -279,6 +279,10 @@ let tradeLastUpdated = new Date();
 let permitLastUpdated = new Date();
 let tradeLastUpdatedText = '';
 let permitLastUpdatedText = '';
+// 허가는 구별로 실제 조회 가능한 최대 기간이 다를 수 있어(날짜마다도 바뀜), 코로플레스로
+// 지역을 공정하게 비교하려면 모든 구가 공통으로 보장하는 기간까지만 써야 한다. main.py가
+// 매 실행마다 계산해서 permits.json에 같이 저장해준다.
+let permitSafeDays = null;
 
 let aggregatedTradeData = [];
 let aggregatedPermitData = [];
@@ -319,14 +323,30 @@ async function loadDataset(url) {
         rawData,
         lastUpdated: json.last_updated ? new Date(json.last_updated.replace(' ', 'T')) : new Date(),
         lastUpdatedText: json.last_updated || '',
+        safeDays: typeof json.safe_days === 'number' ? json.safe_days : null,
     };
 }
 
+// 선택한 기간이 허가 데이터의 구별 공통 보장 기간(permitSafeDays)보다 길면 그 기간으로
+// 줄인다 - 안 그러면 조회기간이 짧게 잡힌 구가 실제보다 활동이 적은 것처럼 보여서
+// 코로플레스 지역 비교가 불공정해진다.
+function effectivePermitPeriod(period) {
+    if (period === 'all' || permitSafeDays == null) return period;
+    return String(Math.min(parseInt(period), permitSafeDays));
+}
+
 function updateLastUpdatedLabel() {
-    const label = currentMode === 'trade'
-        ? (tradeLastUpdatedText && `실거래가 업데이트: ${tradeLastUpdatedText}`)
-        : (permitLastUpdatedText && `허가정보 업데이트: ${permitLastUpdatedText}`);
-    document.getElementById('last-updated').innerText = label || '';
+    if (currentMode === 'trade') {
+        document.getElementById('last-updated').innerText =
+            tradeLastUpdatedText ? `실거래가 업데이트: ${tradeLastUpdatedText}` : '';
+        return;
+    }
+
+    let label = permitLastUpdatedText ? `허가정보 업데이트: ${permitLastUpdatedText}` : '';
+    if (label && currentPeriod !== 'all' && permitSafeDays != null && parseInt(currentPeriod) > permitSafeDays) {
+        label += ` · 지역 공정 비교를 위해 최근 ${permitSafeDays}일까지만 반영`;
+    }
+    document.getElementById('last-updated').innerText = label;
 }
 
 async function loadAllData() {
@@ -346,6 +366,7 @@ async function loadAllData() {
         allPermitData = permit.rawData;
         permitLastUpdated = permit.lastUpdated;
         permitLastUpdatedText = permit.lastUpdatedText;
+        permitSafeDays = permit.safeDays;
 
         updateLastUpdatedLabel();
         setPeriod('60', document.getElementById('btn60'));
@@ -593,7 +614,7 @@ function indexByKey(aggregated) {
 
 function recomputeAggregates(period) {
     aggregatedTradeData = aggregateData(filterByPeriod(allTradeData, tradeLastUpdated, period));
-    aggregatedPermitData = aggregateData(filterByPeriod(allPermitData, permitLastUpdated, period));
+    aggregatedPermitData = aggregateData(filterByPeriod(allPermitData, permitLastUpdated, effectivePermitPeriod(period)));
     tradeByKey = indexByKey(aggregatedTradeData);
     permitByKey = indexByKey(aggregatedPermitData);
 }
@@ -610,6 +631,7 @@ function setPeriod(period, btn) {
     renderMarkers(aggregatedCurrentData);
     updateChoropleths();
     updateZoomLayers();
+    updateLastUpdatedLabel();
 
     if(document.getElementById('rankingPanel').style.display === 'flex') {
         currentRankLimit = 10;

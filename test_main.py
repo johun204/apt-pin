@@ -12,6 +12,7 @@ from main import (
     fetch_page,
     find_widest_successful_window,
     filter_residential_permits,
+    compute_permit_safe_days,
 )
 
 
@@ -207,6 +208,18 @@ def test_filter_residential_permits():
     assert [r["id"] for r in result] == ["keep"]
 
 
+def test_compute_permit_safe_days_uses_the_worst_district():
+    # 코로플레스로 지역을 비교하려면 제일 짧게 잡힌 구를 기준으로 삼아야 공정하다.
+    window_cache = {d['code']: 90 for d in main.SEOUL_DISTRICTS}
+    window_cache[main.SEOUL_DISTRICTS[3]['code']] = 62  # 한 구만 유독 짧게 잡힘
+    assert compute_permit_safe_days(window_cache) == 62
+
+
+def test_compute_permit_safe_days_missing_district_counts_as_zero():
+    window_cache = {d['code']: 90 for d in main.SEOUL_DISTRICTS[1:]}  # 첫 구는 기록이 아예 없음
+    assert compute_permit_safe_days(window_cache) == 0
+
+
 def test_find_widest_successful_window_finds_exact_boundary():
     # 실제 API의 숨겨진 최대 허용 조회기간이 39일이라고 가정 (구/날짜마다 달라지는 상황을 흉내)
     threshold = 39
@@ -315,6 +328,8 @@ if __name__ == "__main__":
     test_fetch_district_permits_reuses_cached_window_and_probes_one_day_wider()
     test_fetch_district_permits_falls_back_to_full_search_when_cache_stale()
     test_filter_residential_permits()
+    test_compute_permit_safe_days_uses_the_worst_district()
+    test_compute_permit_safe_days_missing_district_counts_as_zero()
     test_find_widest_successful_window_finds_exact_boundary()
     test_find_widest_successful_window_boundary_at_initial_days()
     test_find_widest_successful_window_never_succeeds()

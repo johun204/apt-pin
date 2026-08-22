@@ -127,11 +127,14 @@ def save_json_cache(path, cache):
     print(f"캐시 파일 저장 완료: {path} ({len(cache)}개)")
 
 
-def save_data(path, data):
+def save_data(path, data, extra=None):
     last_updated = (datetime.now(timezone.utc) + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    output = {"last_updated": last_updated, "data": data}
+    if extra:
+        output.update(extra)
     with open(path, 'w', encoding='utf-8') as f:
-        json.dump({"last_updated": last_updated, "data": data}, f, ensure_ascii=False, indent=2)
+        json.dump(output, f, ensure_ascii=False, indent=2)
     print(f"저장 완료 ({path}): {last_updated}, {len(data)}건")
 
 
@@ -461,6 +464,14 @@ async def crawl_permits(session, geocode_semaphore, cache, stats, window_cache):
     return data
 
 
+def compute_permit_safe_days(window_cache):
+    """구별로 실제 조회 가능한 기간이 다를 수 있어(날짜별로도 바뀜), 코로플레스로 지역을
+    공정하게 비교하려면 모든 구가 공통으로 보장하는 최소 기간까지만 써야 한다. 한 구라도
+    기록이 없으면(한 번도 성공한 적 없음) 0으로 잡아 보수적으로 계산한다.
+    """
+    return min((window_cache.get(d['code'], 0) for d in SEOUL_DISTRICTS), default=0)
+
+
 # -------------------- 실행 -------------------- #
 async def main():
     if not KAKAO_API_KEY:
@@ -486,8 +497,11 @@ async def main():
     print(f"실거래 완료: API 호출 {trade_stats['api_call']}회, 캐시 사용 {trade_stats['cache_hit']}회")
     print(f"허가 완료: API 호출 {permit_stats['api_call']}회, 캐시 사용 {permit_stats['cache_hit']}회")
 
+    permit_safe_days = compute_permit_safe_days(window_cache)
+    print(f"허가 구별 공통 안전 조회기간: {permit_safe_days}일")
+
     save_data(TRADE_DATA_FILE_PATH, trade_data)
-    save_data(PERMIT_DATA_FILE_PATH, permit_data)
+    save_data(PERMIT_DATA_FILE_PATH, permit_data, {"safe_days": permit_safe_days})
     save_json_cache(CACHE_FILE_PATH, cache)
     save_json_cache(PERMIT_WINDOW_CACHE_PATH, window_cache)
 
