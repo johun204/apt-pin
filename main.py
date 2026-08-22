@@ -222,7 +222,12 @@ async def fetch_page(session, semaphore, url, params, max_retries=RATE_LIMIT_MAX
                     text = await response.text()
                     break
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                print(f"[오류] {params['pageNo']}페이지 요청 실패: {e}")
+                if attempt < max_retries:
+                    wait = RATE_LIMIT_BACKOFF_BASE * (2 ** attempt)
+                    print(f"[재시도] {params['pageNo']}페이지 요청 실패({e!r}), {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
+                    await asyncio.sleep(wait)
+                    continue
+                print(f"[오류] {params['pageNo']}페이지 요청 실패({e!r}) 재시도 초과")
                 return None, []
 
     try:

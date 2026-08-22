@@ -78,17 +78,60 @@ def test_parse_xml_items_api_error_raises():
 
 def test_fetch_page_survives_connection_timeout():
     # 실제 GitHub Actions에서 관측된 실패: session.get()이 커넥션 타임아웃으로 예외를 던져도
-    # fetch_page는 크래시하지 않고 (None, [])을 반환해야 나머지 페이지/구 수집이 계속된다.
+    # fetch_page는 크래시하지 않고, 429와 동일하게 재시도한 뒤 (None, [])을 반환해야 한다.
+    call_count = {'n': 0}
+
     class FakeSession:
         def get(self, *args, **kwargs):
+            call_count['n'] += 1
             raise aiohttp.ClientConnectionError("connection timeout")
 
     async def run():
-        return await fetch_page(FakeSession(), asyncio.Semaphore(1), 'http://example.com', {'pageNo': '1'})
+        with patch('main.RATE_LIMIT_BACKOFF_BASE', 0):
+            return await fetch_page(FakeSession(), asyncio.Semaphore(1), 'http://example.com', {'pageNo': '1'}, max_retries=2)
 
     root, items = asyncio.run(run())
+    assert call_count['n'] == 3  # 최초 시도 + 재시도 2회
     assert root is None
     assert items == []
+
+
+def test_fetch_page_retries_on_timeout_then_succeeds():
+    call_count = {'n': 0}
+
+    class FakeResponse:
+        def __init__(self, text):
+            self.status = 200
+            self._text = text
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def text(self):
+            return self._text
+
+    success_xml = (
+        "<response><header><resultCode>000</resultCode></header>"
+        "<body><items><item><aptNm>X</aptNm></item></items></body></response>"
+    )
+
+    class FakeSession:
+        def get(self, *args, **kwargs):
+            call_count['n'] += 1
+            if call_count['n'] <= 2:
+                raise asyncio.TimeoutError()
+            return FakeResponse(success_xml)
+
+    async def run():
+        with patch('main.RATE_LIMIT_BACKOFF_BASE', 0):
+            return await fetch_page(FakeSession(), asyncio.Semaphore(1), 'http://example.com', {'pageNo': '1'})
+
+    root, items = asyncio.run(run())
+    assert call_count['n'] == 3
+    assert len(items) == 1
 
 
 def test_fetch_page_retries_on_429_then_succeeds():
@@ -323,6 +366,7 @@ if __name__ == "__main__":
     test_parse_xml_items_success()
     test_parse_xml_items_api_error_raises()
     test_fetch_page_survives_connection_timeout()
+    test_fetch_page_retries_on_timeout_then_succeeds()
     test_fetch_page_retries_on_429_then_succeeds()
     test_fetch_page_gives_up_after_max_retries_on_429()
     test_fetch_district_permits_reuses_cached_window_and_probes_one_day_wider()
