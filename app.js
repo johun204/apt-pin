@@ -683,9 +683,10 @@ function buildPinIcon(pt) {
         html: `
             ${label ? `<div class="pin-label">${label}</div>` : ''}
             <svg width="32" height="40" viewBox="0 0 32 40">
-                <path d="M9 19 L23 19 L16 38 Z" fill="${pinColor}"/>
-                <circle cx="16" cy="14" r="12" fill="${pinColor}" stroke="#fff" stroke-width="2.5"/>
-                <text x="16" y="18.5" text-anchor="middle" font-size="11" font-weight="800" fill="#fff">${pt.count}</text>
+                <path d="M16 3 L27 14 L27 29 L23 29 L16 38 L9 29 L5 29 L5 14 Z" fill="${pinColor}" stroke="#fff" stroke-width="2"/>
+                <line x1="5" y1="14" x2="27" y2="14" stroke="#fff" stroke-width="1.5" opacity="0.85"/>
+                <rect x="13" y="24" width="6" height="5" rx="1" fill="#fff" opacity="0.9"/>
+                <text x="16" y="21.5" text-anchor="middle" font-size="10" font-weight="800" fill="#fff">${pt.count}</text>
             </svg>
         `,
         className: 'pin-marker',

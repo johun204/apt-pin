@@ -1,12 +1,12 @@
 {
-  "name": "부동산핀",
-  "short_name": "부동산핀",
-  "start_url": "/real-estate-map",
+  "name": "아파트핀",
+  "short_name": "아파트핀",
+  "start_url": "/apt-pin",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#2c8ec9",
   "icons": [
-    { "src": "/real-estate-map/images/icon-192x192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "/real-estate-map/images/icon-512x512.png", "sizes": "512x512", "type": "image/png" }
+    { "src": "/apt-pin/images/icon-192x192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/apt-pin/images/icon-512x512.png", "sizes": "512x512", "type": "image/png" }
   ]
 }
