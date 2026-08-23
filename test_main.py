@@ -1,4 +1,7 @@
 import asyncio
+import json
+import os
+import tempfile
 from datetime import date
 from unittest.mock import patch
 
@@ -10,9 +13,11 @@ from main import (
     target_deal_months,
     parse_xml_items,
     fetch_page,
+    fetch_post,
     find_widest_successful_window,
     filter_residential_permits,
     compute_permit_safe_days,
+    save_data,
 )
 
 
@@ -355,6 +360,81 @@ def test_seoul_districts_is_subset_of_lawd_cd():
     assert all(d['code'].startswith('11') for d in main.SEOUL_DISTRICTS)
 
 
+def test_fetch_post_retries_on_timeout_then_succeeds():
+    # 2026-08-23 실행에서 관측된 실패: 토지거래허가 POST(fetch_post)는 재시도가 전혀 없어
+    # 일시적 타임아웃 한 번에 해당 구 전체를 포기했다. fetch_page와 동일하게 재시도해야 한다.
+    call_count = {'n': 0}
+
+    class FakeResponse:
+        def __init__(self, text):
+            self.status = 200
+            self._text = text
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def text(self):
+            return self._text
+
+    class FakeSession:
+        def post(self, *args, **kwargs):
+            call_count['n'] += 1
+            if call_count['n'] <= 2:
+                raise aiohttp.ClientConnectionError("timeout")
+            return FakeResponse('{"result": []}')
+
+    async def run():
+        with patch('main.RATE_LIMIT_BACKOFF_BASE', 0):
+            return await fetch_post(FakeSession(), 'http://example.com', data={})
+
+    result = asyncio.run(run())
+    assert call_count['n'] == 3
+    assert result == '{"result": []}'
+
+
+def test_fetch_post_gives_up_after_max_retries():
+    class FakeSession:
+        def post(self, *args, **kwargs):
+            raise aiohttp.ClientConnectionError("timeout")
+
+    async def run():
+        with patch('main.RATE_LIMIT_BACKOFF_BASE', 0):
+            return await fetch_post(FakeSession(), 'http://example.com', data={}, max_retries=2)
+
+    result = asyncio.run(run())
+    assert result is None
+
+
+def test_save_data_skips_overwrite_when_result_empty_but_existing_data_present():
+    # 2026-08-23 실행: 허가 크롤링이 전부 실패해 0건을 그대로 저장하면서 기존 9448건 데이터가
+    # 통째로 날아갔다. 빈 결과로 기존 데이터를 덮어쓰지 않는 안전장치가 있어야 한다.
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'permits.json')
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({"last_updated": "old", "data": [{"id": 1}]}, f)
+
+        save_data(path, [])
+
+        with open(path, encoding='utf-8') as f:
+            saved = json.load(f)
+        assert saved['data'] == [{"id": 1}]
+        assert saved['last_updated'] == 'old'
+
+
+def test_save_data_writes_empty_result_when_no_existing_data():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'permits.json')
+
+        save_data(path, [])
+
+        with open(path, encoding='utf-8') as f:
+            saved = json.load(f)
+        assert saved['data'] == []
+
+
 if __name__ == "__main__":
     test_pick_best_document_prefers_apartment()
     test_pick_best_document_falls_back_to_residential()
@@ -367,6 +447,10 @@ if __name__ == "__main__":
     test_parse_xml_items_api_error_raises()
     test_fetch_page_survives_connection_timeout()
     test_fetch_page_retries_on_timeout_then_succeeds()
+    test_fetch_post_retries_on_timeout_then_succeeds()
+    test_fetch_post_gives_up_after_max_retries()
+    test_save_data_skips_overwrite_when_result_empty_but_existing_data_present()
+    test_save_data_writes_empty_result_when_no_existing_data()
     test_fetch_page_retries_on_429_then_succeeds()
     test_fetch_page_gives_up_after_max_retries_on_429()
     test_fetch_district_permits_reuses_cached_window_and_probes_one_day_wider()

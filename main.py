@@ -89,21 +89,35 @@ PERMIT_FINE_STEP_DAYS = 1
 
 
 # -------------------- HTTP 요청 (공용) -------------------- #
-async def fetch_post(session, url, data=None, json_body=None, headers=None):
-    try:
-        kwargs = {}
-        if headers:
-            kwargs["headers"] = headers
-        if json_body is not None:
-            kwargs["json"] = json_body
-        elif data is not None:
-            kwargs["data"] = data
+async def fetch_post(session, url, data=None, json_body=None, headers=None, max_retries=RATE_LIMIT_MAX_RETRIES):
+    kwargs = {}
+    if headers:
+        kwargs["headers"] = headers
+    if json_body is not None:
+        kwargs["json"] = json_body
+    elif data is not None:
+        kwargs["data"] = data
 
-        async with session.post(url, **kwargs) as response:
-            return await response.text()
-    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        print(f"요청 실패 ({url}): {e}")
-        return None
+    for attempt in range(max_retries + 1):
+        try:
+            async with session.post(url, **kwargs) as response:
+                if response.status != 200:
+                    if attempt < max_retries:
+                        wait = RATE_LIMIT_BACKOFF_BASE * (2 ** attempt)
+                        print(f"[재시도] {url} 상태 코드 {response.status}, {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
+                        await asyncio.sleep(wait)
+                        continue
+                    print(f"[오류] {url} 통신 실패 (상태 코드: {response.status})")
+                    return None
+                return await response.text()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            if attempt < max_retries:
+                wait = RATE_LIMIT_BACKOFF_BASE * (2 ** attempt)
+                print(f"[재시도] {url} 요청 실패({e!r}), {wait}초 후 재시도 ({attempt + 1}/{max_retries})")
+                await asyncio.sleep(wait)
+                continue
+            print(f"[오류] {url} 요청 실패({e!r}) 재시도 초과")
+            return None
 
 
 # -------------------- 캐시 파일 입출력 (공용, 딕셔너리 형태 캐시는 전부 이 형식) -------------------- #
@@ -128,6 +142,16 @@ def save_json_cache(path, cache):
 
 
 def save_data(path, data, extra=None):
+    if not data and os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                existing = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+        if existing.get('data'):
+            print(f"[경고] {path}: 이번 수집 결과가 0건이라 기존 데이터({len(existing['data'])}건)를 덮어쓰지 않고 유지합니다.")
+            return
+
     last_updated = (datetime.now(timezone.utc) + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     output = {"last_updated": last_updated, "data": data}

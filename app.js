@@ -686,7 +686,7 @@ function buildPinIcon(pt) {
                 <path d="M16 3 L27 14 L27 29 L23 29 L16 38 L9 29 L5 29 L5 14 Z" fill="${pinColor}" stroke="#fff" stroke-width="2"/>
                 <line x1="5" y1="14" x2="27" y2="14" stroke="#fff" stroke-width="1.5" opacity="0.85"/>
                 <rect x="13" y="24" width="6" height="5" rx="1" fill="#fff" opacity="0.9"/>
-                <text x="16" y="21.5" text-anchor="middle" font-size="10" font-weight="800" fill="#fff">${pt.count}</text>
+                <text x="16" y="22.5" text-anchor="middle" font-size="10" font-weight="800" fill="#fff">${pt.count}</text>
             </svg>
         `,
         className: 'pin-marker',
