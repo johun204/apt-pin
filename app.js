@@ -3,10 +3,11 @@ const map = L.map('map', {
     attributionControl: false
 }).setView([37.5665, 126.9780], 11);
 
-L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+// CARTO 무료 베이스맵(basemaps.cartocdn.com)이 이제 API 키를 요구해 "api key required"로
+// 타일이 안 뜨는 문제 → 키가 필요 없는 OpenStreetMap 기본 타일로 교체.
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
-    subdomains: 'abcd',
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
 }).addTo(map);
 
 L.control.attribution({ position: 'bottomright', prefix: false }).addTo(map);
